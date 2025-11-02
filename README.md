@@ -28,36 +28,20 @@ A complete web application for transcribing, summarizing, and extracting action 
 ### 1. Backend Setup (FastAPI)
 
 ```bash
-# Create project directory
-mkdir meeting-transcription-app
-cd meeting-transcription-app
-
-# Create backend directory
-mkdir backend
+# Backend directory
 cd backend
 
 # Create virtual environment
 python -m venv venv
 source venv/bin/activate  # On Windows: venv\Scripts\activate
 
-# Create requirements.txt
-cat > requirements.txt << EOF
-fastapi==0.104.1
-uvicorn[standard]==0.24.0
-python-multipart==0.0.6
-boto3==1.29.7
-python-jose[cryptography]==3.3.0
-passlib[bcrypt]==1.7.4
-pydantic==2.5.0
-EOF
-
 # Install dependencies
 pip install -r requirements.txt
 
-# Create main.py (copy the FastAPI backend code)
-# Save the backend code as main.py
-
 # Set environment variables
+export AWS_ACCESS_KEY_ID=aws-access-key
+export AWS_SECRET_ACCESS_KEY=aws-secret-key
+export AWS_BEARER_TOKEN_BEDROCK=bedrock-api-token
 export S3_BUCKET_NAME=your-meeting-recordings-bucket
 export AWS_REGION=us-east-1
 export JWT_SECRET_KEY=your-secret-key-change-this
