@@ -46,12 +46,6 @@ export S3_BUCKET_NAME=your-meeting-recordings-bucket
 export AWS_REGION=us-east-1
 export JWT_SECRET_KEY=your-secret-key-change-this
 
-# Configure AWS credentials
-aws configure
-# Enter your AWS Access Key ID
-# Enter your AWS Secret Access Key
-# Enter your default region (e.g., us-east-1)
-
 # Run the backend
 uvicorn main:app --reload --host 0.0.0.0 --port 8000
 ```
@@ -59,27 +53,11 @@ uvicorn main:app --reload --host 0.0.0.0 --port 8000
 ### 2. Frontend Setup (Next.js)
 
 ```bash
-# In a new terminal, go back to project root
-cd ..
-
-# Create Next.js app
-npx create-next-app@latest frontend --typescript --tailwind --app --no-src-dir
+# In a new terminal, go to frontend
 cd frontend
 
 # Install additional dependencies
-npm install axios date-fns
-
-# Create directory structure
-mkdir -p lib app/login app/dashboard app/session/[id]
-
-# Copy the frontend code into respective files:
-# - lib/api.ts
-# - app/page.tsx
-# - app/layout.tsx
-# - app/globals.css
-# - app/login/page.tsx
-# - app/dashboard/page.tsx
-# - app/session/[id]/page.tsx
+npm install
 
 # Create .env.local for environment variables
 cat > .env.local << EOF
@@ -144,8 +122,7 @@ Create an IAM user or role with this policy:
 meeting-transcription-app/
 ├── backend/
 │   ├── main.py                 # FastAPI application
-│   ├── requirements.txt        # Python dependencies
-│   └── venv/                   # Virtual environment
+│   └── requirements.txt        # Python dependencies
 │
 └── frontend/
     ├── app/
