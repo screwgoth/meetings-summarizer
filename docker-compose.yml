@@ -1,0 +1,30 @@
+version: "3.9"
+
+services:
+  backend:
+    build:
+      context: ./backend
+    image: meetings-summarizer-backend
+    container_name: meetings-backend
+    ports:
+      - "8000:8000"
+    environment:
+      AWS_ACCESS_KEY_ID: ${AWS_ACCESS_KEY_ID:-your-access-key-id}
+      AWS_SECRET_ACCESS_KEY: ${AWS_SECRET_ACCESS_KEY:-your-secret-access-key}
+      AWS_BEARER_TOKEN_BEDROCK: ${AWS_BEARER_TOKEN_BEDROCK:-your-bedrock-api-token}
+      JWT_SECRET_KEY: ${JWT_SECRET_KEY:-your-secret-key-change-in-production}
+      S3_BUCKET_NAME: ${S3_BUCKET_NAME:-your-meeting-recordings-bucket}
+      AWS_REGION: ${AWS_REGION:-us-east-1}
+
+  frontend:
+    build:
+      context: ./frontend
+    image: meetings-summarizer-frontend
+    container_name: meetings-frontend
+    ports:
+      - "3000:3000"
+    environment:
+      NEXT_PUBLIC_API_URL: http://localhost:8000
+    depends_on:
+      - backend
+
