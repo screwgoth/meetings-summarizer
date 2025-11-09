@@ -19,7 +19,13 @@ export default function LoginPage() {
     try {
       const data = await authAPI.login({ username, password });
       localStorage.setItem('token', data.access_token);
-      router.push('/dashboard');
+      localStorage.setItem('is_admin', data.is_admin ? 'true' : 'false');
+      localStorage.setItem('requires_password_change', data.requires_password_change ? 'true' : 'false');
+      if (data.requires_password_change) {
+        router.push('/profile?firstLogin=1');
+      } else {
+        router.push('/dashboard');
+      }
     } catch (err: any) {
       setError(err.response?.data?.detail || 'Login failed');
     } finally {
@@ -78,13 +84,6 @@ export default function LoginPage() {
             {loading ? 'Signing in...' : 'Sign In'}
           </button>
         </form>
-
-        <div className="mt-6 text-center text-sm text-gray-600">
-          <p>Default credentials:</p>
-          <p className="font-mono bg-gray-100 px-3 py-2 rounded mt-2">
-            admin / m33t!ng5
-          </p>
-        </div>
       </div>
     </div>
   );
