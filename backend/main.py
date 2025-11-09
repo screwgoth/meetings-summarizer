@@ -54,13 +54,41 @@ def get_aws_clients():
     return s3_client, transcribe_client, bedrock_client
 
 # In-memory storage (replace with database in production)
-users_db = {
-    "admin": {
-        "username": "admin",
-        "hashed_password": pwd_context.hash("m33t!ng5"),
-        "sessions": []
+users_db = {}
+
+
+def _create_user(
+    username: str,
+    password: str,
+    *,
+    email: Optional[str] = None,
+    full_name: Optional[str] = None,
+    is_admin: bool = False,
+    must_change_password: bool = True,
+):
+    global users_db
+    if username in users_db:
+        raise ValueError("User already exists")
+    users_db[username] = {
+        "username": username,
+        "email": email,
+        "full_name": full_name,
+        "hashed_password": pwd_context.hash(password),
+        "must_change_password": must_change_password,
+        "is_admin": is_admin,
+        "token_version": 1,
+        "sessions": [],
     }
-}
+
+
+_create_user(
+    "admin",
+    "m33t!ng5",
+    email="admin@example.com",
+    full_name="Administrator",
+    is_admin=True,
+    must_change_password=False,
+)
 
 # Models
 class LoginRequest(BaseModel):
@@ -85,6 +113,47 @@ class MeetingSession(BaseModel):
 class CreateSessionRequest(BaseModel):
     title: str
 
+
+class LoginResponse(BaseModel):
+    access_token: str
+    token_type: str = "bearer"
+    requires_password_change: bool
+    is_admin: bool
+
+
+class UserProfile(BaseModel):
+    username: str
+    email: Optional[str]
+    full_name: Optional[str]
+    is_admin: bool
+    must_change_password: bool
+
+
+class UpdateProfileRequest(BaseModel):
+    email: Optional[str] = None
+    full_name: Optional[str] = None
+
+
+class ChangePasswordRequest(BaseModel):
+    current_password: str
+    new_password: str
+
+
+class CreateUserRequest(BaseModel):
+    username: str
+    email: Optional[str] = None
+    password: str
+    full_name: Optional[str] = None
+    is_admin: bool = False
+
+
+class UserSummary(BaseModel):
+    username: str
+    email: Optional[str]
+    full_name: Optional[str]
+    is_admin: bool
+    must_change_password: bool
+
 # Authentication functions
 def verify_password(plain_password, hashed_password):
     return pwd_context.verify(plain_password, hashed_password)
@@ -101,13 +170,28 @@ def verify_token(credentials: HTTPAuthorizationCredentials = Depends(security)):
         token = credentials.credentials
         payload = jwt.decode(token, SECRET_KEY, algorithms=[ALGORITHM])
         username: str = payload.get("sub")
+        token_version = payload.get("ver")
         if username is None or username not in users_db:
+            raise HTTPException(status_code=401, detail="Invalid credentials")
+        user = users_db[username]
+        if token_version is None or token_version != user["token_version"]:
             raise HTTPException(status_code=401, detail="Invalid credentials")
         return username
     except jwt.ExpiredSignatureError:
         raise HTTPException(status_code=401, detail="Token expired")
     except jwt.JWTError:
         raise HTTPException(status_code=401, detail="Invalid token")
+
+
+def get_current_user(username: str = Depends(verify_token)):
+    return users_db[username]
+
+
+def require_admin(username: str = Depends(verify_token)):
+    user = users_db[username]
+    if not user.get("is_admin"):
+        raise HTTPException(status_code=403, detail="Admin privileges required")
+    return username
 
 # AWS helper functions
 def upload_to_s3(file_content, filename, bucket_name):
@@ -282,7 +366,7 @@ Please list all action items in a clear, bullet-point format. Include who is res
     return invoke_claude(prompt)
 
 # API Endpoints
-@app.post("/api/auth/login", response_model=Token)
+@app.post("/api/auth/login", response_model=LoginResponse)
 async def login(request: LoginRequest):
     """Authenticate user and return JWT token"""
     user = users_db.get(request.username)
@@ -292,8 +376,106 @@ async def login(request: LoginRequest):
             detail="Incorrect username or password"
         )
     
-    access_token = create_access_token(data={"sub": request.username})
-    return {"access_token": access_token, "token_type": "bearer"}
+    access_token = create_access_token(
+        data={"sub": request.username, "ver": user["token_version"]}
+    )
+    return {
+        "access_token": access_token,
+        "token_type": "bearer",
+        "requires_password_change": user.get("must_change_password", False),
+        "is_admin": user.get("is_admin", False),
+    }
+
+
+@app.get("/api/users/me", response_model=UserProfile)
+async def get_profile(user=Depends(get_current_user)):
+    """Get the current user's profile"""
+    return {
+        "username": user["username"],
+        "email": user.get("email"),
+        "full_name": user.get("full_name"),
+        "is_admin": user.get("is_admin", False),
+        "must_change_password": user.get("must_change_password", False),
+    }
+
+
+@app.put("/api/users/me", response_model=UserProfile)
+async def update_profile(request: UpdateProfileRequest, user=Depends(get_current_user)):
+    """Update the current user's profile"""
+    if request.email is not None:
+        user["email"] = request.email.strip() or None
+    if request.full_name is not None:
+        user["full_name"] = request.full_name.strip() or None
+
+    return {
+        "username": user["username"],
+        "email": user.get("email"),
+        "full_name": user.get("full_name"),
+        "is_admin": user.get("is_admin", False),
+        "must_change_password": user.get("must_change_password", False),
+    }
+
+
+@app.post("/api/users/me/change-password")
+async def change_password(request: ChangePasswordRequest, user=Depends(get_current_user)):
+    """Change the current user's password and invalidate existing tokens"""
+    if not verify_password(request.current_password, user["hashed_password"]):
+        raise HTTPException(status_code=400, detail="Current password is incorrect")
+    if request.current_password == request.new_password:
+        raise HTTPException(status_code=400, detail="New password must be different")
+    if len(request.new_password) < 8:
+        raise HTTPException(status_code=400, detail="New password must be at least 8 characters long")
+
+    user["hashed_password"] = pwd_context.hash(request.new_password)
+    user["must_change_password"] = False
+    user["token_version"] += 1
+
+    return {"message": "Password updated. Please log in again.", "requires_logout": True}
+
+
+@app.get("/api/admin/users", response_model=List[UserSummary])
+async def list_users(_admin=Depends(require_admin)):
+    """List all users (admin only)"""
+    result = []
+    for user in users_db.values():
+        result.append(
+            UserSummary(
+                username=user["username"],
+                email=user.get("email"),
+                full_name=user.get("full_name"),
+                is_admin=user.get("is_admin", False),
+                must_change_password=user.get("must_change_password", False),
+            )
+        )
+    return result
+
+
+@app.post("/api/admin/users", response_model=UserSummary, status_code=status.HTTP_201_CREATED)
+async def create_user(request: CreateUserRequest, _admin=Depends(require_admin)):
+    """Create a new user (admin only)"""
+    if request.username in users_db:
+        raise HTTPException(status_code=400, detail="Username already exists")
+    if len(request.password) < 8:
+        raise HTTPException(status_code=400, detail="Password must be at least 8 characters long")
+
+    users_db[request.username] = {
+        "username": request.username,
+        "email": request.email,
+        "full_name": request.full_name,
+        "hashed_password": pwd_context.hash(request.password),
+        "must_change_password": True,
+        "is_admin": request.is_admin,
+        "token_version": 1,
+        "sessions": [],
+    }
+
+    return UserSummary(
+        username=request.username,
+        email=request.email,
+        full_name=request.full_name,
+        is_admin=request.is_admin,
+        must_change_password=True,
+    )
 
 @app.get("/api/sessions", response_model=List[MeetingSession])
 async def get_sessions(username: str = Depends(verify_token)):

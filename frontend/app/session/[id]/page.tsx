@@ -2,7 +2,7 @@
 
 import { useState, useEffect } from 'react';
 import { useRouter, useParams } from 'next/navigation';
-import { sessionsAPI, MeetingSession } from '@/lib/api';
+import { sessionsAPI, MeetingSession, usersAPI } from '@/lib/api';
 import { format } from 'date-fns';
 
 export default function SessionDetailPage() {
@@ -13,39 +13,79 @@ export default function SessionDetailPage() {
   const [processing, setProcessing] = useState(false);
 
   useEffect(() => {
-    loadSession();
-    
-    // Set up polling interval
-    const interval = setInterval(async () => {
-      try {
-        const data = await sessionsAPI.getOne(params.id as string);
-        console.log('🔄 Polling - Current session:', data);
-        
-        // Only call process endpoint if not completed or error
-        if (data.status !== 'completed' && data.status !== 'error') {
-          console.log('📞 Calling process endpoint for status:', data.status);
-          const updatedData = await sessionsAPI.process(params.id as string);
-          console.log('✅ Process response:', updatedData);
-          setSession(updatedData);
-        } else {
-          console.log('⏹️ Session finished with status:', data.status);
-          setSession(data);
-        }
-      } catch (err) {
-        console.error('❌ Polling error:', err);
+    let pollingInterval: ReturnType<typeof setInterval> | null = null;
+
+    const init = async () => {
+      const token = localStorage.getItem('token');
+      if (!token) {
+        router.push('/login');
+        return;
       }
-    }, 5000);
-    
-    return () => clearInterval(interval);
-  }, [params.id]);
+
+      try {
+        const profile = await usersAPI.getProfile();
+        if (profile.must_change_password) {
+          router.push('/profile?firstLogin=1');
+          return;
+        }
+      } catch (err: any) {
+        console.error('Failed to verify user profile', err);
+        if (err.response?.status === 401) {
+          localStorage.removeItem('token');
+          router.push('/login');
+        }
+        return;
+      }
+
+      await loadSession();
+
+      pollingInterval = setInterval(async () => {
+        try {
+          const data = await sessionsAPI.getOne(params.id as string);
+          console.log('🔄 Polling - Current session:', data);
+
+          if (data.status !== 'completed' && data.status !== 'error') {
+            console.log('📞 Calling process endpoint for status:', data.status);
+            const updatedData = await sessionsAPI.process(params.id as string);
+            console.log('✅ Process response:', updatedData);
+            setSession(updatedData);
+          } else {
+            console.log('⏹️ Session finished with status:', data.status);
+            setSession(data);
+          }
+        } catch (err: any) {
+          console.error('❌ Polling error:', err);
+          if (err.response?.status === 401) {
+            if (pollingInterval) {
+              clearInterval(pollingInterval);
+            }
+            localStorage.removeItem('token');
+            router.push('/login');
+          }
+        }
+      }, 5000);
+    };
+
+    init();
+
+    return () => {
+      if (pollingInterval) {
+        clearInterval(pollingInterval);
+      }
+    };
+  }, [params.id, router]);
 
   const loadSession = async () => {
     try {
       const data = await sessionsAPI.getOne(params.id as string);
       console.log('📥 Initial load - Session:', data);
       setSession(data);
-    } catch (err) {
+    } catch (err: any) {
       console.error('❌ Failed to load session:', err);
+      if (err.response?.status === 401) {
+        localStorage.removeItem('token');
+        router.push('/login');
+      }
     } finally {
       setLoading(false);
     }

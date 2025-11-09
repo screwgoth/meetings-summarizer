@@ -9,11 +9,16 @@ export default function HomePage() {
   useEffect(() => {
     const token = localStorage.getItem('token');
     if (token) {
-      router.push('/dashboard');
+      const requiresPasswordChange = localStorage.getItem('requires_password_change') === 'true';
+      if (requiresPasswordChange) {
+        router.push('/profile?firstLogin=1');
+      } else {
+        router.push('/dashboard');
+      }
     } else {
       router.push('/login');
     }
-  }, []);
+  }, [router]);
 
   return (
     <div className="min-h-screen flex items-center justify-center">
