@@ -46,7 +46,10 @@ export S3_BUCKET_NAME=your-meeting-recordings-bucket
 export AWS_REGION=us-east-1
 export JWT_SECRET_KEY=your-secret-key-change-this
 
-# Run the backend
+# (Optional) Override DB URL; by default this uses a local SQLite file
+# export DATABASE_URL=postgresql+psycopg2://meetings:meetingspassword@localhost:5432/meetings
+
+# Run the backend (local dev)
 uvicorn main:app --reload --host 0.0.0.0 --port 8000
 ```
 
@@ -66,6 +69,43 @@ EOF
 
 # Run the frontend
 npm run dev
+```
+
+### 3. Running Everything with Docker Compose (incl. PostgreSQL)
+
+The repository includes a `docker-compose.yml` that starts:
+- FastAPI backend (`meetings-backend`)
+- Next.js frontend (`meetings-frontend`)
+- PostgreSQL database (`meetings-postgres`)
+
+```bash
+# From the project root
+docker compose up --build
+```
+
+This will:
+- Expose the backend on `http://localhost:8000`
+- Expose the frontend on `http://localhost:3000`
+- Start PostgreSQL on `localhost:5432`
+
+The backend is configured to use PostgreSQL via the `DATABASE_URL` environment variable in `docker-compose.yml`:
+
+```bash
+DATABASE_URL=postgresql+psycopg2://meetings:meetingspassword@db:5432/meetings
+```
+
+To override this (e.g. for production), create a `.env` file in the project root and set `DATABASE_URL` there; Docker Compose will pick it up automatically.
+
+### 4. Connecting to PostgreSQL from a Client (Optional)
+
+You can connect to the DB (e.g. with `psql` or a GUI like TablePlus/DBeaver) using:
+
+```bash
+Host:     localhost
+Port:     5432
+Database: meetings
+User:     meetings
+Password: meetingspassword
 ```
 
 ### 3. AWS Configuration
@@ -183,6 +223,7 @@ AWS_REGION=us-east-1
 JWT_SECRET_KEY=your-super-secret-key-change-this
 AWS_ACCESS_KEY_ID=your-access-key
 AWS_SECRET_ACCESS_KEY=your-secret-key
+DATABASE_URL=postgresql+psycopg2://meetings:meetingspassword@localhost:5432/meetings
 ```
 
 ### Frontend Environment Variables
