@@ -3,6 +3,17 @@ from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 from typing import List, Optional
+from sqlalchemy import (
+    Boolean,
+    Column,
+    DateTime,
+    ForeignKey,
+    Integer,
+    String,
+    Text,
+    create_engine,
+)
+from sqlalchemy.orm import declarative_base, relationship, sessionmaker, Session
 import boto3
 import json
 import time
@@ -32,6 +43,89 @@ ACCESS_TOKEN_EXPIRE_MINUTES = 1440  # 24 hours
 pwd_context = CryptContext(schemes=["bcrypt"], deprecated="auto")
 security = HTTPBearer()
 
+# Database configuration
+DATABASE_URL = os.environ.get(
+    "DATABASE_URL", "sqlite:///./meetings.db"
+)
+
+engine = create_engine(DATABASE_URL, future=True)
+SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
+Base = declarative_base()
+
+
+class User(Base):
+    __tablename__ = "users"
+
+    id = Column(Integer, primary_key=True, index=True)
+    username = Column(String(255), unique=True, index=True, nullable=False)
+    email = Column(String(255), nullable=True)
+    full_name = Column(String(255), nullable=True)
+    hashed_password = Column(String(255), nullable=False)
+    must_change_password = Column(Boolean, default=True, nullable=False)
+    is_admin = Column(Boolean, default=False, nullable=False)
+    token_version = Column(Integer, default=1, nullable=False)
+    created_at = Column(DateTime, default=datetime.utcnow, nullable=False)
+
+    sessions = relationship(
+        "MeetingSessionDB",
+        back_populates="user",
+        cascade="all, delete-orphan",
+    )
+
+
+class MeetingSessionDB(Base):
+    __tablename__ = "meeting_sessions"
+
+    id = Column(String(64), primary_key=True, index=True)
+    user_id = Column(Integer, ForeignKey("users.id"), nullable=False, index=True)
+    title = Column(String(255), nullable=False)
+    filename = Column(String(255), nullable=False)
+    upload_date = Column(String(64), nullable=False)
+    status = Column(String(32), nullable=False, default="uploading")
+    transcription = Column(Text, nullable=True)
+    summary = Column(Text, nullable=True)
+    action_items = Column(Text, nullable=True)
+    duration = Column(String(64), nullable=True)
+    job_name = Column(String(255), nullable=True)
+    error = Column(Text, nullable=True)
+
+    user = relationship("User", back_populates="sessions")
+
+
+def get_db():
+    db = SessionLocal()
+    try:
+        yield db
+    finally:
+        db.close()
+
+
+def init_db():
+    """Create tables and ensure default admin user exists."""
+    Base.metadata.create_all(bind=engine)
+    db: Session = SessionLocal()
+    try:
+        admin = db.query(User).filter(User.username == "admin").first()
+        if not admin:
+            admin = User(
+                username="admin",
+                email="admin@example.com",
+                full_name="Administrator",
+                hashed_password=pwd_context.hash("m33t!ng5"),
+                must_change_password=False,
+                is_admin=True,
+                token_version=1,
+            )
+            db.add(admin)
+            db.commit()
+    finally:
+        db.close()
+
+
+@app.on_event("startup")
+def on_startup():
+    init_db()
+
 # AWS Configuration
 S3_BUCKET = os.environ.get('S3_BUCKET_NAME', 'your-meeting-recordings-bucket')
 AWS_REGION = os.environ.get('AWS_REGION', 'us-east-1')
@@ -40,6 +134,7 @@ AWS_REGION = os.environ.get('AWS_REGION', 'us-east-1')
 s3_client = None
 transcribe_client = None
 bedrock_client = None
+
 
 def get_aws_clients():
     """Get AWS clients, initializing them if needed"""
@@ -53,44 +148,7 @@ def get_aws_clients():
             pass  # AWS credentials not configured
     return s3_client, transcribe_client, bedrock_client
 
-# In-memory storage (replace with database in production)
-users_db = {}
-
-
-def _create_user(
-    username: str,
-    password: str,
-    *,
-    email: Optional[str] = None,
-    full_name: Optional[str] = None,
-    is_admin: bool = False,
-    must_change_password: bool = True,
-):
-    global users_db
-    if username in users_db:
-        raise ValueError("User already exists")
-    users_db[username] = {
-        "username": username,
-        "email": email,
-        "full_name": full_name,
-        "hashed_password": pwd_context.hash(password),
-        "must_change_password": must_change_password,
-        "is_admin": is_admin,
-        "token_version": 1,
-        "sessions": [],
-    }
-
-
-_create_user(
-    "admin",
-    "m33t!ng5",
-    email="admin@example.com",
-    full_name="Administrator",
-    is_admin=True,
-    must_change_password=False,
-)
-
-# Models
+# Pydantic Models
 class LoginRequest(BaseModel):
     username: str
     password: str
@@ -165,16 +223,21 @@ def create_access_token(data: dict):
     encoded_jwt = jwt.encode(to_encode, SECRET_KEY, algorithm=ALGORITHM)
     return encoded_jwt
 
-def verify_token(credentials: HTTPAuthorizationCredentials = Depends(security)):
+def verify_token(
+    credentials: HTTPAuthorizationCredentials = Depends(security),
+    db: Session = Depends(get_db),
+):
     try:
         token = credentials.credentials
         payload = jwt.decode(token, SECRET_KEY, algorithms=[ALGORITHM])
         username: str = payload.get("sub")
         token_version = payload.get("ver")
-        if username is None or username not in users_db:
+        if username is None:
             raise HTTPException(status_code=401, detail="Invalid credentials")
-        user = users_db[username]
-        if token_version is None or token_version != user["token_version"]:
+        user = db.query(User).filter(User.username == username).first()
+        if not user:
+            raise HTTPException(status_code=401, detail="Invalid credentials")
+        if token_version is None or token_version != user.token_version:
             raise HTTPException(status_code=401, detail="Invalid credentials")
         return username
     except jwt.ExpiredSignatureError:
@@ -183,13 +246,22 @@ def verify_token(credentials: HTTPAuthorizationCredentials = Depends(security)):
         raise HTTPException(status_code=401, detail="Invalid token")
 
 
-def get_current_user(username: str = Depends(verify_token)):
-    return users_db[username]
+def get_current_user(
+    username: str = Depends(verify_token),
+    db: Session = Depends(get_db),
+):
+    user = db.query(User).filter(User.username == username).first()
+    if not user:
+        raise HTTPException(status_code=401, detail="Invalid credentials")
+    return user
 
 
-def require_admin(username: str = Depends(verify_token)):
-    user = users_db[username]
-    if not user.get("is_admin"):
+def require_admin(
+    username: str = Depends(verify_token),
+    db: Session = Depends(get_db),
+):
+    user = db.query(User).filter(User.username == username).first()
+    if not user or not user.is_admin:
         raise HTTPException(status_code=403, detail="Admin privileges required")
     return username
 
@@ -367,23 +439,21 @@ Please list all action items in a clear, bullet-point format. Include who is res
 
 # API Endpoints
 @app.post("/api/auth/login", response_model=LoginResponse)
-async def login(request: LoginRequest):
+async def login(request: LoginRequest, db: Session = Depends(get_db)):
     """Authenticate user and return JWT token"""
-    user = users_db.get(request.username)
-    if not user or not verify_password(request.password, user["hashed_password"]):
+    user = db.query(User).filter(User.username == request.username).first()
+    if not user or not verify_password(request.password, user.hashed_password):
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail="Incorrect username or password"
         )
     
-    access_token = create_access_token(
-        data={"sub": request.username, "ver": user["token_version"]}
-    )
+    access_token = create_access_token(data={"sub": request.username, "ver": user.token_version})
     return {
         "access_token": access_token,
         "token_type": "bearer",
-        "requires_password_change": user.get("must_change_password", False),
-        "is_admin": user.get("is_admin", False),
+        "requires_password_change": user.must_change_password,
+        "is_admin": user.is_admin,
     }
 
 
@@ -391,83 +461,106 @@ async def login(request: LoginRequest):
 async def get_profile(user=Depends(get_current_user)):
     """Get the current user's profile"""
     return {
-        "username": user["username"],
-        "email": user.get("email"),
-        "full_name": user.get("full_name"),
-        "is_admin": user.get("is_admin", False),
-        "must_change_password": user.get("must_change_password", False),
+        "username": user.username,
+        "email": user.email,
+        "full_name": user.full_name,
+        "is_admin": user.is_admin,
+        "must_change_password": user.must_change_password,
     }
 
 
 @app.put("/api/users/me", response_model=UserProfile)
-async def update_profile(request: UpdateProfileRequest, user=Depends(get_current_user)):
+async def update_profile(
+    request: UpdateProfileRequest,
+    user=Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
     """Update the current user's profile"""
     if request.email is not None:
-        user["email"] = request.email.strip() or None
+        user.email = request.email.strip() or None
     if request.full_name is not None:
-        user["full_name"] = request.full_name.strip() or None
+        user.full_name = request.full_name.strip() or None
+
+    db.add(user)
+    db.commit()
+    db.refresh(user)
 
     return {
-        "username": user["username"],
-        "email": user.get("email"),
-        "full_name": user.get("full_name"),
-        "is_admin": user.get("is_admin", False),
-        "must_change_password": user.get("must_change_password", False),
+        "username": user.username,
+        "email": user.email,
+        "full_name": user.full_name,
+        "is_admin": user.is_admin,
+        "must_change_password": user.must_change_password,
     }
 
 
 @app.post("/api/users/me/change-password")
-async def change_password(request: ChangePasswordRequest, user=Depends(get_current_user)):
+async def change_password(
+    request: ChangePasswordRequest,
+    user=Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
     """Change the current user's password and invalidate existing tokens"""
-    if not verify_password(request.current_password, user["hashed_password"]):
+    if not verify_password(request.current_password, user.hashed_password):
         raise HTTPException(status_code=400, detail="Current password is incorrect")
     if request.current_password == request.new_password:
         raise HTTPException(status_code=400, detail="New password must be different")
     if len(request.new_password) < 8:
         raise HTTPException(status_code=400, detail="New password must be at least 8 characters long")
 
-    user["hashed_password"] = pwd_context.hash(request.new_password)
-    user["must_change_password"] = False
-    user["token_version"] += 1
+    user.hashed_password = pwd_context.hash(request.new_password)
+    user.must_change_password = False
+    user.token_version += 1
+
+    db.add(user)
+    db.commit()
 
     return {"message": "Password updated. Please log in again.", "requires_logout": True}
 
 
 @app.get("/api/admin/users", response_model=List[UserSummary])
-async def list_users(_admin=Depends(require_admin)):
+async def list_users(
+    _admin=Depends(require_admin),
+    db: Session = Depends(get_db),
+):
     """List all users (admin only)"""
-    result = []
-    for user in users_db.values():
-        result.append(
-            UserSummary(
-                username=user["username"],
-                email=user.get("email"),
-                full_name=user.get("full_name"),
-                is_admin=user.get("is_admin", False),
-                must_change_password=user.get("must_change_password", False),
-            )
+    users = db.query(User).order_by(User.username.asc()).all()
+    return [
+        UserSummary(
+            username=u.username,
+            email=u.email,
+            full_name=u.full_name,
+            is_admin=u.is_admin,
+            must_change_password=u.must_change_password,
         )
-    return result
+        for u in users
+    ]
 
 
 @app.post("/api/admin/users", response_model=UserSummary, status_code=status.HTTP_201_CREATED)
-async def create_user(request: CreateUserRequest, _admin=Depends(require_admin)):
+async def create_user(
+    request: CreateUserRequest,
+    _admin=Depends(require_admin),
+    db: Session = Depends(get_db),
+):
     """Create a new user (admin only)"""
-    if request.username in users_db:
+    existing = db.query(User).filter(User.username == request.username).first()
+    if existing:
         raise HTTPException(status_code=400, detail="Username already exists")
     if len(request.password) < 8:
         raise HTTPException(status_code=400, detail="Password must be at least 8 characters long")
 
-    users_db[request.username] = {
-        "username": request.username,
-        "email": request.email,
-        "full_name": request.full_name,
-        "hashed_password": pwd_context.hash(request.password),
-        "must_change_password": True,
-        "is_admin": request.is_admin,
-        "token_version": 1,
-        "sessions": [],
-    }
+    new_user = User(
+        username=request.username,
+        email=request.email,
+        full_name=request.full_name,
+        hashed_password=pwd_context.hash(request.password),
+        must_change_password=True,
+        is_admin=request.is_admin,
+        token_version=1,
+    )
+    db.add(new_user)
+    db.commit()
 
     return UserSummary(
         username=request.username,
@@ -478,35 +571,63 @@ async def create_user(request: CreateUserRequest, _admin=Depends(require_admin))
     )
 
 @app.get("/api/sessions", response_model=List[MeetingSession])
-async def get_sessions(username: str = Depends(verify_token)):
+async def get_sessions(
+    username: str = Depends(verify_token),
+    db: Session = Depends(get_db),
+):
     """Get all meeting sessions for the authenticated user"""
-    user = users_db[username]
-    return user["sessions"]
+    user = db.query(User).filter(User.username == username).first()
+    if not user:
+        raise HTTPException(status_code=401, detail="Invalid credentials")
+
+    sessions = (
+        db.query(MeetingSessionDB)
+        .filter(MeetingSessionDB.user_id == user.id)
+        .order_by(MeetingSessionDB.upload_date.desc())
+        .all()
+    )
+    return [
+        MeetingSession(
+            id=s.id,
+            title=s.title,
+            filename=s.filename,
+            upload_date=s.upload_date,
+            status=s.status,
+            transcription=s.transcription,
+            summary=s.summary,
+            action_items=s.action_items,
+            duration=s.duration,
+        )
+        for s in sessions
+    ]
 
 @app.post("/api/sessions", response_model=MeetingSession)
 async def create_session(
     title: str,
     file: UploadFile = File(...),
-    username: str = Depends(verify_token)
+    username: str = Depends(verify_token),
+    db: Session = Depends(get_db),
 ):
     """Create a new meeting session and start processing"""
-    user = users_db[username]
-    
+    user = db.query(User).filter(User.username == username).first()
+    if not user:
+        raise HTTPException(status_code=401, detail="Invalid credentials")
+
     # Create session
     session_id = str(uuid.uuid4())
-    session = {
-        "id": session_id,
-        "title": title,
-        "filename": file.filename,
-        "upload_date": datetime.now().isoformat(),
-        "status": "uploading",
-        "transcription": None,
-        "summary": None,
-        "action_items": None,
-        "duration": None
-    }
-    
-    user["sessions"].insert(0, session)
+    upload_date = datetime.now().isoformat()
+
+    db_session_obj = MeetingSessionDB(
+        id=session_id,
+        user_id=user.id,
+        title=title,
+        filename=file.filename,
+        upload_date=upload_date,
+        status="uploading",
+    )
+    db.add(db_session_obj)
+    db.commit()
+    db.refresh(db_session_obj)
     
     # Process file asynchronously (in production, use background tasks)
     try:
@@ -518,18 +639,32 @@ async def create_session(
         file_uri, file_key = upload_to_s3(file_content, file.filename, S3_BUCKET)
         
         # Update status
-        session["status"] = "transcribing"
+        db_session_obj.status = "transcribing"
         
         # Start transcription
         job_name = f"meeting_{session_id}_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
         start_transcription_job(file_uri, job_name, media_format)
-        session["job_name"] = job_name
+        db_session_obj.job_name = job_name
         
     except Exception as e:
-        session["status"] = "error"
-        session["error"] = str(e)
-    
-    return session
+        db_session_obj.status = "error"
+        db_session_obj.error = str(e)
+    finally:
+        db.add(db_session_obj)
+        db.commit()
+        db.refresh(db_session_obj)
+
+    return MeetingSession(
+        id=db_session_obj.id,
+        title=db_session_obj.title,
+        filename=db_session_obj.filename,
+        upload_date=db_session_obj.upload_date,
+        status=db_session_obj.status,
+        transcription=db_session_obj.transcription,
+        summary=db_session_obj.summary,
+        action_items=db_session_obj.action_items,
+        duration=db_session_obj.duration,
+    )
 
 @app.get("/api/sessions/{session_id}", response_model=MeetingSession)
 async def get_session(session_id: str, username: str = Depends(verify_token)):

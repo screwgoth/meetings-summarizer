@@ -6,6 +6,8 @@ services:
       context: ./backend
     image: meetings-summarizer-backend
     container_name: meetings-backend
+    depends_on:
+      - db
     ports:
       - "8000:8000"
     environment:
@@ -15,6 +17,7 @@ services:
       JWT_SECRET_KEY: ${JWT_SECRET_KEY:-your-secret-key-change-in-production}
       S3_BUCKET_NAME: ${S3_BUCKET_NAME:-your-meeting-recordings-bucket}
       AWS_REGION: ${AWS_REGION:-us-east-1}
+      DATABASE_URL: ${DATABASE_URL:-postgresql+psycopg2://meetings:meetingspassword@db:5432/meetings}
 
   frontend:
     build:
@@ -27,4 +30,21 @@ services:
       NEXT_PUBLIC_API_URL: http://localhost:8000
     depends_on:
       - backend
+      - db
+
+  db:
+    image: postgres:16
+    container_name: meetings-postgres
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: ${POSTGRES_DB:-meetings}
+      POSTGRES_USER: ${POSTGRES_USER:-meetings}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-meetingspassword}
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+
+volumes:
+  postgres_data:
 
