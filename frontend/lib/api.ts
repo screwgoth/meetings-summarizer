@@ -45,6 +45,7 @@ export interface MeetingSession {
   summary?: string;
   action_items?: string;
   duration?: string;
+  error?: string;
 }
 
 export const authAPI = {
@@ -103,7 +104,6 @@ export const sessionsAPI = {
     formData.append('title', title);
     
     const response = await api.post('/api/sessions', formData, {
-      params: { title },
       headers: { 'Content-Type': 'multipart/form-data' },
     });
     return response.data;
@@ -111,6 +111,19 @@ export const sessionsAPI = {
   
   process: async (id: string): Promise<MeetingSession> => {
     const response = await api.post(`/api/sessions/${id}/process`);
+    return response.data;
+  },
+
+  getSpeakerLabels: async (id: string) => {
+    const response = await api.get(`/api/sessions/${id}/speakers`);
+    return response.data as { labels: string[]; current_mappings: Record<string, string> };
+  },
+  
+  renameSpeakers: async (
+    id: string,
+    mapping: Record<string, string>,
+  ): Promise<MeetingSession> => {
+    const response = await api.patch(`/api/sessions/${id}/speakers`, { mapping });
     return response.data;
   },
   

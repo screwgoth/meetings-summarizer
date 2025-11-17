@@ -1,4 +1,4 @@
-from fastapi import FastAPI, HTTPException, Depends, UploadFile, File, status
+from fastapi import FastAPI, HTTPException, Depends, UploadFile, File, Form, status
 from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
@@ -16,6 +16,7 @@ from sqlalchemy import (
 from sqlalchemy.orm import declarative_base, relationship, sessionmaker, Session
 import boto3
 import json
+import re
 import time
 from datetime import datetime, timedelta
 import os
@@ -83,11 +84,13 @@ class MeetingSessionDB(Base):
     upload_date = Column(String(64), nullable=False)
     status = Column(String(32), nullable=False, default="uploading")
     transcription = Column(Text, nullable=True)
+    original_transcription = Column(Text, nullable=True)  # Store original before mappings
     summary = Column(Text, nullable=True)
     action_items = Column(Text, nullable=True)
     duration = Column(String(64), nullable=True)
     job_name = Column(String(255), nullable=True)
     error = Column(Text, nullable=True)
+    speaker_mappings = Column(Text, nullable=True)  # JSON string: {"spk_0": "John", "spk_1": "Jane"}
 
     user = relationship("User", back_populates="sessions")
 
@@ -139,13 +142,59 @@ bedrock_client = None
 def get_aws_clients():
     """Get AWS clients, initializing them if needed"""
     global s3_client, transcribe_client, bedrock_client
-    if s3_client is None:
+    
+    # Check if all clients are initialized, if not, reinitialize
+    if not all([s3_client, transcribe_client, bedrock_client]):
+        # Reset all clients to ensure clean initialization
+        s3_client = None
+        transcribe_client = None
+        bedrock_client = None
+        
         try:
-            s3_client = boto3.client('s3')
-            transcribe_client = boto3.client('transcribe')
-            bedrock_client = boto3.client('bedrock-runtime')
-        except Exception:
-            pass  # AWS credentials not configured
+            # Get region from environment
+            region = os.environ.get('AWS_REGION', 'us-east-1')
+            # Verify credentials are set
+            access_key = os.environ.get('AWS_ACCESS_KEY_ID')
+            secret_key = os.environ.get('AWS_SECRET_ACCESS_KEY')
+            
+            if not access_key or not secret_key:
+                raise ValueError("AWS_ACCESS_KEY_ID and AWS_SECRET_ACCESS_KEY must be set")
+            
+            print(f"🔧 Initializing AWS clients for region: {region}")
+            # Create clients with explicit region and credentials from environment
+            print("  Creating S3 client...")
+            s3_client = boto3.client('s3', region_name=region)
+            print("  ✅ S3 client created")
+            
+            print("  Creating Transcribe client...")
+            transcribe_client = boto3.client('transcribe', region_name=region)
+            if transcribe_client is None:
+                raise RuntimeError("Failed to create Transcribe client")
+            print("  ✅ Transcribe client created")
+            
+            print("  Creating Bedrock client...")
+            bedrock_client = boto3.client('bedrock-runtime', region_name=region)
+            if bedrock_client is None:
+                raise RuntimeError("Failed to create Bedrock client")
+            print("  ✅ Bedrock client created")
+            
+            # Final verification
+            if not all([s3_client, transcribe_client, bedrock_client]):
+                raise RuntimeError(f"Client initialization incomplete: S3={s3_client is not None}, Transcribe={transcribe_client is not None}, Bedrock={bedrock_client is not None}")
+            
+            print(f"✅ All AWS clients initialized successfully for region: {region}")
+            import sys
+            sys.stdout.flush()
+        except Exception as e:
+            # Reset clients on failure to allow retry
+            s3_client = None
+            transcribe_client = None
+            bedrock_client = None
+            print(f"❌ Failed to initialize AWS clients: {str(e)}")
+            import traceback
+            traceback.print_exc()
+            raise HTTPException(status_code=500, detail=f"AWS credentials not configured: {str(e)}")
+    
     return s3_client, transcribe_client, bedrock_client
 
 # Pydantic Models
@@ -167,6 +216,7 @@ class MeetingSession(BaseModel):
     summary: Optional[str] = None
     action_items: Optional[str] = None
     duration: Optional[str] = None
+    error: Optional[str] = None
 
 class CreateSessionRequest(BaseModel):
     title: str
@@ -195,6 +245,15 @@ class UpdateProfileRequest(BaseModel):
 class ChangePasswordRequest(BaseModel):
     current_password: str
     new_password: str
+
+
+class SpeakerRenameRequest(BaseModel):
+    mapping: dict[str, str]
+
+
+class SpeakerLabelsResponse(BaseModel):
+    labels: list[str]
+    current_mappings: dict[str, str]
 
 
 class CreateUserRequest(BaseModel):
@@ -437,6 +496,39 @@ Please list all action items in a clear, bullet-point format. Include who is res
     
     return invoke_claude(prompt)
 
+
+def _extract_speaker_labels(transcription: Optional[str]) -> list[str]:
+    """Extract unique speaker labels from transcription text."""
+    if not transcription:
+        return []
+    # Match patterns like "spk_0:", "spk_1:", "Speaker 0:", etc.
+    patterns = [
+        r'spk_\d+:',  # spk_0:, spk_1:, etc.
+        r'Speaker \d+:',  # Speaker 0:, Speaker 1:, etc.
+    ]
+    labels = set()
+    for pattern in patterns:
+        matches = re.findall(pattern, transcription, re.IGNORECASE)
+        labels.update(matches)
+    # Remove the colon and return sorted list
+    return sorted([label.rstrip(':') for label in labels])
+
+
+def _apply_speaker_mapping(text: Optional[str], mapping: dict[str, str]) -> Optional[str]:
+    """Replace speaker labels/names in arbitrary text fields."""
+    if text is None:
+        return None
+    updated = text
+    for label, name in mapping.items():
+        clean_name = name.strip()
+        if not clean_name:
+            continue
+        # Replace patterns like "spk_0:" or "Speaker 0:" first
+        updated = updated.replace(f"{label}:", f"{clean_name}:")
+        # Fallback replacement of bare labels, to also catch mentions in summary/action items
+        updated = updated.replace(label, clean_name)
+    return updated
+
 # API Endpoints
 @app.post("/api/auth/login", response_model=LoginResponse)
 async def login(request: LoginRequest, db: Session = Depends(get_db)):
@@ -597,13 +689,14 @@ async def get_sessions(
             summary=s.summary,
             action_items=s.action_items,
             duration=s.duration,
+            error=s.error,
         )
         for s in sessions
     ]
 
 @app.post("/api/sessions", response_model=MeetingSession)
 async def create_session(
-    title: str,
+    title: str = Form(...),
     file: UploadFile = File(...),
     username: str = Depends(verify_token),
     db: Session = Depends(get_db),
@@ -612,6 +705,10 @@ async def create_session(
     user = db.query(User).filter(User.username == username).first()
     if not user:
         raise HTTPException(status_code=401, detail="Invalid credentials")
+
+    # Validate filename
+    if not file.filename or not file.filename.strip():
+        raise HTTPException(status_code=400, detail="File must have a filename")
 
     # Create session
     session_id = str(uuid.uuid4())
@@ -633,8 +730,12 @@ async def create_session(
     try:
         # Upload to S3
         file_content = await file.read()
-        file_extension = file.filename.split('.')[-1].lower()
-        media_format = file_extension if file_extension in ['mp3', 'mp4', 'wav', 'flac', 'ogg'] else 'mp3'
+        # Extract file extension safely
+        if '.' in file.filename:
+            file_extension = file.filename.split('.')[-1].lower()
+        else:
+            file_extension = 'mp3'  # Default extension
+        media_format = file_extension if file_extension in ['mp3', 'mp4', 'wav', 'flac', 'ogg', 'm4a'] else 'mp3'
         
         file_uri, file_key = upload_to_s3(file_content, file.filename, S3_BUCKET)
         
@@ -646,9 +747,19 @@ async def create_session(
         start_transcription_job(file_uri, job_name, media_format)
         db_session_obj.job_name = job_name
         
-    except Exception as e:
+    except HTTPException as e:
+        # HTTPException has detail in e.detail
         db_session_obj.status = "error"
-        db_session_obj.error = str(e)
+        db_session_obj.error = e.detail if hasattr(e, 'detail') else str(e)
+        print(f"❌ Upload error (HTTPException): {db_session_obj.error}")
+    except Exception as e:
+        # Regular exceptions
+        db_session_obj.status = "error"
+        error_msg = str(e) if str(e) else f"Unknown error: {type(e).__name__}"
+        db_session_obj.error = error_msg
+        print(f"❌ Upload error: {error_msg}")
+        import traceback
+        traceback.print_exc()
     finally:
         db.add(db_session_obj)
         db.commit()
@@ -664,81 +775,263 @@ async def create_session(
         summary=db_session_obj.summary,
         action_items=db_session_obj.action_items,
         duration=db_session_obj.duration,
+        error=db_session_obj.error,
     )
 
 @app.get("/api/sessions/{session_id}", response_model=MeetingSession)
-async def get_session(session_id: str, username: str = Depends(verify_token)):
+async def get_session(
+    session_id: str,
+    username: str = Depends(verify_token),
+    db: Session = Depends(get_db),
+):
     """Get a specific meeting session"""
-    user = users_db[username]
-    session = next((s for s in user["sessions"] if s["id"] == session_id), None)
-    
-    if not session:
-        raise HTTPException(status_code=404, detail="Session not found")
-    
-    return session
+    user = db.query(User).filter(User.username == username).first()
+    if not user:
+        raise HTTPException(status_code=401, detail="Invalid credentials")
 
-@app.post("/api/sessions/{session_id}/process")
-async def process_session(session_id: str, username: str = Depends(verify_token)):
-    """Check and process transcription for a session"""
-    user = users_db[username]
-    session = next((s for s in user["sessions"] if s["id"] == session_id), None)
-    
-    if not session:
+    db_session_obj = (
+        db.query(MeetingSessionDB)
+        .filter(MeetingSessionDB.id == session_id, MeetingSessionDB.user_id == user.id)
+        .first()
+    )
+
+    if not db_session_obj:
         raise HTTPException(status_code=404, detail="Session not found")
+
+    # Load and apply speaker mappings if they exist
+    # Use original transcription if available, otherwise use current
+    source_transcription = db_session_obj.original_transcription or db_session_obj.transcription
+    transcription = source_transcription
+    summary = db_session_obj.summary
+    action_items = db_session_obj.action_items
     
-    print(f"🔍 Processing session {session_id}, current status: {session['status']}")
-    
-    if session["status"] == "transcribing":
-        print(f"📞 Checking transcription status for job: {session.get('job_name')}")
+    if db_session_obj.speaker_mappings:
+        try:
+            mapping = json.loads(db_session_obj.speaker_mappings)
+            transcription = _apply_speaker_mapping(source_transcription, mapping)
+            summary = _apply_speaker_mapping(summary, mapping)
+            action_items = _apply_speaker_mapping(action_items, mapping)
+        except json.JSONDecodeError:
+            pass  # Invalid JSON, ignore
+
+    return MeetingSession(
+        id=db_session_obj.id,
+        title=db_session_obj.title,
+        filename=db_session_obj.filename,
+        upload_date=db_session_obj.upload_date,
+        status=db_session_obj.status,
+        transcription=transcription,
+        summary=summary,
+        action_items=action_items,
+        duration=db_session_obj.duration,
+        error=db_session_obj.error,
+    )
+
+@app.post("/api/sessions/{session_id}/process", response_model=MeetingSession)
+async def process_session(
+    session_id: str,
+    username: str = Depends(verify_token),
+    db: Session = Depends(get_db),
+):
+    """Check and process transcription for a session"""
+    user = db.query(User).filter(User.username == username).first()
+    if not user:
+        raise HTTPException(status_code=401, detail="Invalid credentials")
+
+    db_session_obj = (
+        db.query(MeetingSessionDB)
+        .filter(MeetingSessionDB.id == session_id, MeetingSessionDB.user_id == user.id)
+        .first()
+    )
+
+    if not db_session_obj:
+        raise HTTPException(status_code=404, detail="Session not found")
+
+    print(f"🔍 Processing session {session_id}, current status: {db_session_obj.status}")
+
+    if db_session_obj.status == "transcribing":
+        print(f"📞 Checking transcription status for job: {db_session_obj.job_name}")
         # Check transcription status
-        job = check_transcription_status(session.get("job_name"))
-        
+        job = check_transcription_status(db_session_obj.job_name)
+
         if job:
-            status_value = job['TranscriptionJobStatus']
+            status_value = job["TranscriptionJobStatus"]
             print(f"✅ AWS Transcribe job status: {status_value}")
-            
-            if status_value == 'COMPLETED':
+
+            if status_value == "COMPLETED":
                 # Get transcription
-                transcript_uri = job['Transcript']['TranscriptFileUri']
+                transcript_uri = job["Transcript"]["TranscriptFileUri"]
                 transcript_data = get_transcription_result(transcript_uri)
-                formatted_transcript, raw_transcript = format_transcript_with_speakers(transcript_data)
-                
-                session["transcription"] = formatted_transcript
-                session["status"] = "analyzing"
-                print(f"📝 Transcription complete, status changed to: {session['status']}")
-                
+                formatted_transcript, raw_transcript = format_transcript_with_speakers(
+                    transcript_data
+                )
+
+                db_session_obj.transcription = formatted_transcript
+                db_session_obj.original_transcription = formatted_transcript  # Store original
+                db_session_obj.status = "analyzing"
+                print(
+                    f"📝 Transcription complete, status changed to: {db_session_obj.status}"
+                )
+
                 # Generate summary and action items
-                session["summary"] = generate_summary(raw_transcript)
-                session["action_items"] = extract_action_items(raw_transcript)
-                session["status"] = "completed"
-                print(f"🎉 Analysis complete, final status: {session['status']}")
-                
-            elif status_value == 'FAILED':
-                session["status"] = "error"
-                session["error"] = job.get('FailureReason', 'Unknown error')
-                print(f"❌ Transcription failed: {session['error']}")
+                db_session_obj.summary = generate_summary(raw_transcript)
+                db_session_obj.action_items = extract_action_items(raw_transcript)
+                db_session_obj.status = "completed"
+                print(f"🎉 Analysis complete, final status: {db_session_obj.status}")
+
+            elif status_value == "FAILED":
+                db_session_obj.status = "error"
+                db_session_obj.error = job.get("FailureReason", "Unknown error")
+                print(f"❌ Transcription failed: {db_session_obj.error}")
         else:
             # AWS not configured - mark as error
-            print(f"⚠️ AWS credentials not configured, marking as error")
-            session["status"] = "error"
-            session["error"] = "AWS credentials not configured. Cannot process transcription."
+            print("⚠️ AWS credentials not configured, marking as error")
+            db_session_obj.status = "error"
+            db_session_obj.error = (
+                "AWS credentials not configured. Cannot process transcription."
+            )
     else:
-        print(f"⏭️ Skipping processing, status is: {session['status']}")
+        print(f"⏭️ Skipping processing, status is: {db_session_obj.status}")
+
+    db.add(db_session_obj)
+    db.commit()
+    db.refresh(db_session_obj)
+
+    print(f"📤 Returning session with status: {db_session_obj.status}")
+    return MeetingSession(
+        id=db_session_obj.id,
+        title=db_session_obj.title,
+        filename=db_session_obj.filename,
+        upload_date=db_session_obj.upload_date,
+        status=db_session_obj.status,
+        transcription=db_session_obj.transcription,
+        summary=db_session_obj.summary,
+        action_items=db_session_obj.action_items,
+        duration=db_session_obj.duration,
+        error=db_session_obj.error,
+    )
+
+
+@app.get("/api/sessions/{session_id}/speakers", response_model=SpeakerLabelsResponse)
+async def get_speaker_labels(
+    session_id: str,
+    username: str = Depends(verify_token),
+    db: Session = Depends(get_db),
+):
+    """Get available speaker labels and current mappings for a session"""
+    user = db.query(User).filter(User.username == username).first()
+    if not user:
+        raise HTTPException(status_code=401, detail="Invalid credentials")
+
+    db_session_obj = (
+        db.query(MeetingSessionDB)
+        .filter(MeetingSessionDB.id == session_id, MeetingSessionDB.user_id == user.id)
+        .first()
+    )
+
+    if not db_session_obj:
+        raise HTTPException(status_code=404, detail="Session not found")
+
+    # Extract speaker labels from original transcription (before any mappings)
+    source_text = db_session_obj.original_transcription or db_session_obj.transcription
+    labels = _extract_speaker_labels(source_text)
     
-    print(f"📤 Returning session with status: {session['status']}")
-    return session
+    # Load current mappings
+    current_mappings = {}
+    if db_session_obj.speaker_mappings:
+        try:
+            current_mappings = json.loads(db_session_obj.speaker_mappings)
+        except json.JSONDecodeError:
+            pass
+
+    return SpeakerLabelsResponse(labels=labels, current_mappings=current_mappings)
+
+
+@app.patch("/api/sessions/{session_id}/speakers", response_model=MeetingSession)
+async def rename_speakers(
+    session_id: str,
+    request: SpeakerRenameRequest,
+    username: str = Depends(verify_token),
+    db: Session = Depends(get_db),
+):
+    """
+    Rename speakers within a session's transcription, summary, and action items.
+
+    This can be called immediately after transcription or at any time later.
+    """
+    user = db.query(User).filter(User.username == username).first()
+    if not user:
+        raise HTTPException(status_code=401, detail="Invalid credentials")
+
+    db_session_obj = (
+        db.query(MeetingSessionDB)
+        .filter(MeetingSessionDB.id == session_id, MeetingSessionDB.user_id == user.id)
+        .first()
+    )
+
+    if not db_session_obj:
+        raise HTTPException(status_code=404, detail="Session not found")
+
+    mapping = request.mapping or {}
+    
+    # Save the mapping to database
+    db_session_obj.speaker_mappings = json.dumps(mapping)
+    
+    # Get original transcription (before any mappings)
+    original_transcription = db_session_obj.original_transcription or db_session_obj.transcription
+    if not db_session_obj.original_transcription:
+        # First time mapping - store original
+        db_session_obj.original_transcription = db_session_obj.transcription
+    
+    # Apply mapping to original transcription, summary, and action items
+    db_session_obj.transcription = _apply_speaker_mapping(
+        original_transcription, mapping
+    )
+    db_session_obj.summary = _apply_speaker_mapping(db_session_obj.summary, mapping)
+    db_session_obj.action_items = _apply_speaker_mapping(
+        db_session_obj.action_items, mapping
+    )
+
+    db.add(db_session_obj)
+    db.commit()
+    db.refresh(db_session_obj)
+
+    return MeetingSession(
+        id=db_session_obj.id,
+        title=db_session_obj.title,
+        filename=db_session_obj.filename,
+        upload_date=db_session_obj.upload_date,
+        status=db_session_obj.status,
+        transcription=db_session_obj.transcription,
+        summary=db_session_obj.summary,
+        action_items=db_session_obj.action_items,
+        duration=db_session_obj.duration,
+        error=db_session_obj.error,
+    )
 
 @app.delete("/api/sessions/{session_id}")
-async def delete_session(session_id: str, username: str = Depends(verify_token)):
+async def delete_session(
+    session_id: str,
+    username: str = Depends(verify_token),
+    db: Session = Depends(get_db),
+):
     """Delete a meeting session"""
-    user = users_db[username]
-    session = next((s for s in user["sessions"] if s["id"] == session_id), None)
-    
-    if not session:
+    user = db.query(User).filter(User.username == username).first()
+    if not user:
+        raise HTTPException(status_code=401, detail="Invalid credentials")
+
+    db_session_obj = (
+        db.query(MeetingSessionDB)
+        .filter(MeetingSessionDB.id == session_id, MeetingSessionDB.user_id == user.id)
+        .first()
+    )
+
+    if not db_session_obj:
         raise HTTPException(status_code=404, detail="Session not found")
-    
-    user["sessions"] = [s for s in user["sessions"] if s["id"] != session_id]
-    
+
+    db.delete(db_session_obj)
+    db.commit()
+
     return {"message": "Session deleted successfully"}
 
 @app.get("/api/health")
