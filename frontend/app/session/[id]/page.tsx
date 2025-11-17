@@ -11,6 +11,10 @@ export default function SessionDetailPage() {
   const [session, setSession] = useState<MeetingSession | null>(null);
   const [loading, setLoading] = useState(true);
   const [processing, setProcessing] = useState(false);
+  const [showSpeakerMapping, setShowSpeakerMapping] = useState(false);
+  const [speakerLabels, setSpeakerLabels] = useState<string[]>([]);
+  const [speakerMappings, setSpeakerMappings] = useState<Record<string, string>>({});
+  const [savingMappings, setSavingMappings] = useState(false);
 
   useEffect(() => {
     let pollingInterval: ReturnType<typeof setInterval> | null = null;
@@ -49,6 +53,17 @@ export default function SessionDetailPage() {
             const updatedData = await sessionsAPI.process(params.id as string);
             console.log('✅ Process response:', updatedData);
             setSession(updatedData);
+            
+            // Load speaker labels when transcription is complete
+            if (updatedData.status === 'completed' && updatedData.transcription) {
+              try {
+                const speakerData = await sessionsAPI.getSpeakerLabels(params.id as string);
+                setSpeakerLabels(speakerData.labels);
+                setSpeakerMappings(speakerData.current_mappings);
+              } catch (err) {
+                console.error('Failed to load speaker labels', err);
+              }
+            }
           } else {
             console.log('⏹️ Session finished with status:', data.status);
             setSession(data);
@@ -80,6 +95,17 @@ export default function SessionDetailPage() {
       const data = await sessionsAPI.getOne(params.id as string);
       console.log('📥 Initial load - Session:', data);
       setSession(data);
+      
+      // Load speaker labels if transcription exists
+      if (data.transcription && data.status === 'completed') {
+        try {
+          const speakerData = await sessionsAPI.getSpeakerLabels(params.id as string);
+          setSpeakerLabels(speakerData.labels);
+          setSpeakerMappings(speakerData.current_mappings);
+        } catch (err) {
+          console.error('Failed to load speaker labels', err);
+        }
+      }
     } catch (err: any) {
       console.error('❌ Failed to load session:', err);
       if (err.response?.status === 401) {
@@ -88,6 +114,31 @@ export default function SessionDetailPage() {
       }
     } finally {
       setLoading(false);
+    }
+  };
+
+  const handleSaveSpeakerMappings = async () => {
+    if (!session) return;
+    
+    setSavingMappings(true);
+    try {
+      const updated = await sessionsAPI.renameSpeakers(session.id, speakerMappings);
+      setSession(updated);
+      
+      // Reload speaker labels to get updated mappings
+      try {
+        const speakerData = await sessionsAPI.getSpeakerLabels(session.id);
+        setSpeakerMappings(speakerData.current_mappings);
+      } catch (err) {
+        console.error('Failed to reload speaker labels', err);
+      }
+      
+      setShowSpeakerMapping(false);
+    } catch (err: any) {
+      console.error('Failed to save speaker mappings', err);
+      alert('Failed to save speaker mappings. Please try again.');
+    } finally {
+      setSavingMappings(false);
     }
   };
 
@@ -256,16 +307,75 @@ export default function SessionDetailPage() {
       {session.status === 'completed' && (
         <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 py-4">
           <div className="bg-green-50 border border-green-200 rounded-lg p-4">
-            <div className="flex">
-              <div className="flex-shrink-0">
-                <span className="text-green-600 text-xl">✓</span>
+            <div className="flex justify-between items-center">
+              <div className="flex">
+                <div className="flex-shrink-0">
+                  <span className="text-green-600 text-xl">✓</span>
+                </div>
+                <div className="ml-3">
+                  <h3 className="text-sm font-medium text-green-800">Processing Complete</h3>
+                  <p className="mt-1 text-sm text-green-700">
+                    Your meeting has been transcribed and analyzed successfully.
+                  </p>
+                </div>
               </div>
-              <div className="ml-3">
-                <h3 className="text-sm font-medium text-green-800">Processing Complete</h3>
-                <p className="mt-1 text-sm text-green-700">
-                  Your meeting has been transcribed and analyzed successfully.
-                </p>
-              </div>
+              {speakerLabels.length > 0 && (
+                <button
+                  onClick={() => setShowSpeakerMapping(!showSpeakerMapping)}
+                  className="bg-blue-600 hover:bg-blue-700 text-white px-4 py-2 rounded-lg text-sm font-semibold transition"
+                >
+                  {showSpeakerMapping ? 'Hide' : 'Edit'} Speaker Names
+                </button>
+              )}
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Speaker Mapping UI */}
+      {session.status === 'completed' && showSpeakerMapping && speakerLabels.length > 0 && (
+        <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 py-4">
+          <div className="bg-white rounded-lg shadow p-6">
+            <h2 className="text-xl font-bold text-gray-800 mb-4">👥 Assign Speaker Names</h2>
+            <p className="text-sm text-gray-600 mb-4">
+              Replace speaker labels (spk_0, spk_1, etc.) with actual participant names. 
+              Changes will be applied to the transcription, summary, and action items.
+            </p>
+            <div className="space-y-3">
+              {speakerLabels.map((label) => (
+                <div key={label} className="flex items-center gap-4">
+                  <label className="w-24 text-sm font-medium text-gray-700">
+                    {label}:
+                  </label>
+                  <input
+                    type="text"
+                    value={speakerMappings[label] || ''}
+                    onChange={(e) =>
+                      setSpeakerMappings({
+                        ...speakerMappings,
+                        [label]: e.target.value,
+                      })
+                    }
+                    placeholder="Enter participant name"
+                    className="flex-1 px-4 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-transparent"
+                  />
+                </div>
+              ))}
+            </div>
+            <div className="flex gap-3 mt-6">
+              <button
+                onClick={handleSaveSpeakerMappings}
+                disabled={savingMappings}
+                className="bg-blue-600 hover:bg-blue-700 text-white px-6 py-2 rounded-lg font-semibold transition disabled:bg-gray-400"
+              >
+                {savingMappings ? 'Saving...' : 'Save Changes'}
+              </button>
+              <button
+                onClick={() => setShowSpeakerMapping(false)}
+                className="bg-gray-200 hover:bg-gray-300 text-gray-700 px-6 py-2 rounded-lg font-semibold transition"
+              >
+                Cancel
+              </button>
             </div>
           </div>
         </div>
