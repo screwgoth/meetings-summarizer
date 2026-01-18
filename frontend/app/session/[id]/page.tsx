@@ -15,6 +15,8 @@ export default function SessionDetailPage() {
   const [speakerLabels, setSpeakerLabels] = useState<string[]>([]);
   const [speakerMappings, setSpeakerMappings] = useState<Record<string, string>>({});
   const [savingMappings, setSavingMappings] = useState(false);
+  const [stoppingStage, setStoppingStage] = useState<string | null>(null);
+  const [restartingStage, setRestartingStage] = useState<string | null>(null);
 
   useEffect(() => {
     let pollingInterval: ReturnType<typeof setInterval> | null = null;
@@ -43,17 +45,20 @@ export default function SessionDetailPage() {
 
       await loadSession();
 
+      // Statuses that indicate processing is not in progress
+      const terminalStatuses = ['completed', 'error', 'stopped_transcription', 'stopped_analysis'];
+
       pollingInterval = setInterval(async () => {
         try {
           const data = await sessionsAPI.getOne(params.id as string);
           console.log('🔄 Polling - Current session:', data);
 
-          if (data.status !== 'completed' && data.status !== 'error') {
+          if (!terminalStatuses.includes(data.status)) {
             console.log('📞 Calling process endpoint for status:', data.status);
             const updatedData = await sessionsAPI.process(params.id as string);
             console.log('✅ Process response:', updatedData);
             setSession(updatedData);
-            
+
             // Load speaker labels when transcription is complete
             if (updatedData.status === 'completed' && updatedData.transcription) {
               try {
@@ -152,6 +157,36 @@ export default function SessionDetailPage() {
     URL.revokeObjectURL(url);
   };
 
+  const handleStopStage = async (stage: 'transcription' | 'analysis') => {
+    if (!session) return;
+
+    setStoppingStage(stage);
+    try {
+      const updated = await sessionsAPI.stop(session.id, stage);
+      setSession(updated);
+    } catch (err: any) {
+      console.error(`Failed to stop ${stage}:`, err);
+      alert(`Failed to stop ${stage}. ${err.response?.data?.detail || 'Please try again.'}`);
+    } finally {
+      setStoppingStage(null);
+    }
+  };
+
+  const handleRestartStage = async (stage: 'transcription' | 'analysis') => {
+    if (!session) return;
+
+    setRestartingStage(stage);
+    try {
+      const updated = await sessionsAPI.restart(session.id, stage);
+      setSession(updated);
+    } catch (err: any) {
+      console.error(`Failed to restart ${stage}:`, err);
+      alert(`Failed to restart ${stage}. ${err.response?.data?.detail || 'Please try again.'}`);
+    } finally {
+      setRestartingStage(null);
+    }
+  };
+
   if (loading) {
     return (
       <div className="min-h-screen bg-gray-50 flex items-center justify-center">
@@ -202,7 +237,7 @@ export default function SessionDetailPage() {
         <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 py-4">
           <div className="bg-white border border-gray-200 rounded-lg p-6 shadow-sm">
             <h3 className="text-lg font-semibold text-gray-800 mb-4">Processing Status</h3>
-            
+
             {/* Phase Progress */}
             <div className="space-y-4">
               {/* Phase 1: Uploading */}
@@ -227,58 +262,147 @@ export default function SessionDetailPage() {
               </div>
 
               {/* Phase 2: Transcribing */}
-              <div className="flex items-start">
-                <div className="flex-shrink-0">
-                  {session.status === 'transcribing' ? (
-                    <div className="animate-spin rounded-full h-6 w-6 border-b-2 border-blue-600"></div>
-                  ) : session.status === 'uploading' ? (
-                    <div className="rounded-full h-6 w-6 bg-gray-300"></div>
-                  ) : (
-                    <div className="rounded-full h-6 w-6 bg-green-500 flex items-center justify-center">
-                      <span className="text-white text-sm">✓</span>
-                    </div>
-                  )}
+              <div className="flex items-start justify-between">
+                <div className="flex items-start">
+                  <div className="flex-shrink-0">
+                    {session.status === 'transcribing' ? (
+                      <div className="animate-spin rounded-full h-6 w-6 border-b-2 border-blue-600"></div>
+                    ) : session.status === 'uploading' ? (
+                      <div className="rounded-full h-6 w-6 bg-gray-300"></div>
+                    ) : (
+                      <div className="rounded-full h-6 w-6 bg-green-500 flex items-center justify-center">
+                        <span className="text-white text-sm">✓</span>
+                      </div>
+                    )}
+                  </div>
+                  <div className="ml-3">
+                    <p className={`font-medium ${session.status === 'transcribing' ? 'text-blue-600' : session.status === 'uploading' ? 'text-gray-400' : 'text-green-600'}`}>
+                      Transcribing Audio
+                    </p>
+                    <p className="text-sm text-gray-500">
+                      {session.status === 'transcribing' ? 'Converting speech to text with speaker labels...' :
+                       session.status === 'uploading' ? 'Waiting...' : 'Transcription completed'}
+                    </p>
+                  </div>
                 </div>
-                <div className="ml-3">
-                  <p className={`font-medium ${session.status === 'transcribing' ? 'text-blue-600' : session.status === 'uploading' ? 'text-gray-400' : 'text-green-600'}`}>
-                    Transcribing Audio
-                  </p>
-                  <p className="text-sm text-gray-500">
-                    {session.status === 'transcribing' ? 'Converting speech to text with speaker labels...' : 
-                     session.status === 'uploading' ? 'Waiting...' : 'Transcription completed'}
-                  </p>
-                </div>
+                {session.status === 'transcribing' && (
+                  <button
+                    onClick={() => handleStopStage('transcription')}
+                    disabled={stoppingStage === 'transcription'}
+                    className="text-sm px-3 py-1 bg-red-100 hover:bg-red-200 text-red-700 rounded transition disabled:opacity-50"
+                  >
+                    {stoppingStage === 'transcription' ? 'Stopping...' : 'Stop'}
+                  </button>
+                )}
               </div>
 
               {/* Phase 3: Analyzing */}
-              <div className="flex items-start">
-                <div className="flex-shrink-0">
-                  {session.status === 'analyzing' ? (
-                    <div className="animate-spin rounded-full h-6 w-6 border-b-2 border-blue-600"></div>
-                  ) : session.status === 'uploading' || session.status === 'transcribing' ? (
-                    <div className="rounded-full h-6 w-6 bg-gray-300"></div>
-                  ) : (
-                    <div className="rounded-full h-6 w-6 bg-green-500 flex items-center justify-center">
-                      <span className="text-white text-sm">✓</span>
-                    </div>
-                  )}
+              <div className="flex items-start justify-between">
+                <div className="flex items-start">
+                  <div className="flex-shrink-0">
+                    {session.status === 'analyzing' ? (
+                      <div className="animate-spin rounded-full h-6 w-6 border-b-2 border-blue-600"></div>
+                    ) : session.status === 'uploading' || session.status === 'transcribing' ? (
+                      <div className="rounded-full h-6 w-6 bg-gray-300"></div>
+                    ) : (
+                      <div className="rounded-full h-6 w-6 bg-green-500 flex items-center justify-center">
+                        <span className="text-white text-sm">✓</span>
+                      </div>
+                    )}
+                  </div>
+                  <div className="ml-3">
+                    <p className={`font-medium ${session.status === 'analyzing' ? 'text-blue-600' : (session.status === 'uploading' || session.status === 'transcribing') ? 'text-gray-400' : 'text-green-600'}`}>
+                      AI Analysis
+                    </p>
+                    <p className="text-sm text-gray-500">
+                      {session.status === 'analyzing' ? 'Generating summary and extracting action items...' :
+                       (session.status === 'uploading' || session.status === 'transcribing') ? 'Waiting...' : 'Analysis completed'}
+                    </p>
+                  </div>
                 </div>
-                <div className="ml-3">
-                  <p className={`font-medium ${session.status === 'analyzing' ? 'text-blue-600' : (session.status === 'uploading' || session.status === 'transcribing') ? 'text-gray-400' : 'text-green-600'}`}>
-                    AI Analysis
-                  </p>
-                  <p className="text-sm text-gray-500">
-                    {session.status === 'analyzing' ? 'Generating summary and extracting action items...' : 
-                     (session.status === 'uploading' || session.status === 'transcribing') ? 'Waiting...' : 'Analysis completed'}
-                  </p>
-                </div>
+                {session.status === 'analyzing' && (
+                  <button
+                    onClick={() => handleStopStage('analysis')}
+                    disabled={stoppingStage === 'analysis'}
+                    className="text-sm px-3 py-1 bg-red-100 hover:bg-red-200 text-red-700 rounded transition disabled:opacity-50"
+                  >
+                    {stoppingStage === 'analysis' ? 'Stopping...' : 'Stop'}
+                  </button>
+                )}
               </div>
             </div>
 
             <div className="mt-4 pt-4 border-t border-gray-200">
               <p className="text-sm text-gray-600">
-                This process may take a few minutes depending on the length of your recording.
+                {session.status === 'analyzing' && session.transcription
+                  ? 'Transcription complete! You can view the transcript below while AI analysis continues.'
+                  : 'This process may take a few minutes depending on the length of your recording.'}
               </p>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Stopped Transcription Banner */}
+      {session.status === 'stopped_transcription' && (
+        <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 py-4">
+          <div className="bg-yellow-50 border border-yellow-200 rounded-lg p-4">
+            <div className="flex justify-between items-center">
+              <div className="flex">
+                <div className="flex-shrink-0">
+                  <span className="text-yellow-600 text-xl">⏸️</span>
+                </div>
+                <div className="ml-3">
+                  <h3 className="text-sm font-medium text-yellow-800">Transcription Stopped</h3>
+                  <p className="mt-1 text-sm text-yellow-700">
+                    Transcription was stopped. You can restart it to continue processing.
+                  </p>
+                </div>
+              </div>
+              <button
+                onClick={() => handleRestartStage('transcription')}
+                disabled={restartingStage === 'transcription'}
+                className="bg-blue-600 hover:bg-blue-700 text-white px-4 py-2 rounded-lg text-sm font-semibold transition disabled:opacity-50"
+              >
+                {restartingStage === 'transcription' ? 'Restarting...' : 'Restart Transcription'}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Stopped Analysis Banner */}
+      {session.status === 'stopped_analysis' && (
+        <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 py-4">
+          <div className="bg-yellow-50 border border-yellow-200 rounded-lg p-4">
+            <div className="flex justify-between items-center">
+              <div className="flex">
+                <div className="flex-shrink-0">
+                  <span className="text-yellow-600 text-xl">⏸️</span>
+                </div>
+                <div className="ml-3">
+                  <h3 className="text-sm font-medium text-yellow-800">Analysis Stopped</h3>
+                  <p className="mt-1 text-sm text-yellow-700">
+                    AI analysis was stopped. You can restart it or re-run transcription.
+                  </p>
+                </div>
+              </div>
+              <div className="flex gap-2">
+                <button
+                  onClick={() => handleRestartStage('transcription')}
+                  disabled={restartingStage === 'transcription'}
+                  className="bg-gray-200 hover:bg-gray-300 text-gray-700 px-4 py-2 rounded-lg text-sm font-semibold transition disabled:opacity-50"
+                >
+                  {restartingStage === 'transcription' ? 'Restarting...' : 'Re-transcribe'}
+                </button>
+                <button
+                  onClick={() => handleRestartStage('analysis')}
+                  disabled={restartingStage === 'analysis'}
+                  className="bg-blue-600 hover:bg-blue-700 text-white px-4 py-2 rounded-lg text-sm font-semibold transition disabled:opacity-50"
+                >
+                  {restartingStage === 'analysis' ? 'Restarting...' : 'Restart Analysis'}
+                </button>
+              </div>
             </div>
           </div>
         </div>
@@ -288,15 +412,35 @@ export default function SessionDetailPage() {
       {session.status === 'error' && (
         <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 py-4">
           <div className="bg-red-50 border border-red-200 rounded-lg p-4">
-            <div className="flex">
-              <div className="flex-shrink-0">
-                <span className="text-red-600 text-xl">⚠️</span>
+            <div className="flex justify-between items-center">
+              <div className="flex">
+                <div className="flex-shrink-0">
+                  <span className="text-red-600 text-xl">⚠️</span>
+                </div>
+                <div className="ml-3">
+                  <h3 className="text-sm font-medium text-red-800">Processing Error</h3>
+                  <p className="mt-2 text-sm text-red-700">
+                    {session.error || 'An error occurred while processing your meeting.'}
+                  </p>
+                </div>
               </div>
-              <div className="ml-3">
-                <h3 className="text-sm font-medium text-red-800">Processing Error</h3>
-                <p className="mt-2 text-sm text-red-700">
-                  {(session as any).error || 'An error occurred while processing your meeting.'}
-                </p>
+              <div className="flex gap-2">
+                <button
+                  onClick={() => handleRestartStage('transcription')}
+                  disabled={restartingStage === 'transcription'}
+                  className="bg-gray-200 hover:bg-gray-300 text-gray-700 px-4 py-2 rounded-lg text-sm font-semibold transition disabled:opacity-50"
+                >
+                  {restartingStage === 'transcription' ? 'Restarting...' : 'Retry Transcription'}
+                </button>
+                {session.transcription && (
+                  <button
+                    onClick={() => handleRestartStage('analysis')}
+                    disabled={restartingStage === 'analysis'}
+                    className="bg-blue-600 hover:bg-blue-700 text-white px-4 py-2 rounded-lg text-sm font-semibold transition disabled:opacity-50"
+                  >
+                    {restartingStage === 'analysis' ? 'Restarting...' : 'Retry Analysis'}
+                  </button>
+                )}
               </div>
             </div>
           </div>
@@ -319,14 +463,30 @@ export default function SessionDetailPage() {
                   </p>
                 </div>
               </div>
-              {speakerLabels.length > 0 && (
+              <div className="flex gap-2">
                 <button
-                  onClick={() => setShowSpeakerMapping(!showSpeakerMapping)}
-                  className="bg-blue-600 hover:bg-blue-700 text-white px-4 py-2 rounded-lg text-sm font-semibold transition"
+                  onClick={() => handleRestartStage('transcription')}
+                  disabled={restartingStage === 'transcription'}
+                  className="bg-gray-200 hover:bg-gray-300 text-gray-700 px-4 py-2 rounded-lg text-sm font-semibold transition disabled:opacity-50"
                 >
-                  {showSpeakerMapping ? 'Hide' : 'Edit'} Speaker Names
+                  {restartingStage === 'transcription' ? 'Restarting...' : 'Re-transcribe'}
                 </button>
-              )}
+                <button
+                  onClick={() => handleRestartStage('analysis')}
+                  disabled={restartingStage === 'analysis'}
+                  className="bg-gray-200 hover:bg-gray-300 text-gray-700 px-4 py-2 rounded-lg text-sm font-semibold transition disabled:opacity-50"
+                >
+                  {restartingStage === 'analysis' ? 'Restarting...' : 'Re-analyze'}
+                </button>
+                {speakerLabels.length > 0 && (
+                  <button
+                    onClick={() => setShowSpeakerMapping(!showSpeakerMapping)}
+                    className="bg-blue-600 hover:bg-blue-700 text-white px-4 py-2 rounded-lg text-sm font-semibold transition"
+                  >
+                    {showSpeakerMapping ? 'Hide' : 'Edit'} Speaker Names
+                  </button>
+                )}
+              </div>
             </div>
           </div>
         </div>
