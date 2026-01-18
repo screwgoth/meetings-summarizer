@@ -24,6 +24,18 @@ import urllib.request
 from jose import jwt
 from passlib.context import CryptContext
 import uuid
+import logging
+import sys
+
+# Configure logging
+LOG_LEVEL = os.environ.get("LOG_LEVEL", "INFO").upper()
+logging.basicConfig(
+    level=getattr(logging, LOG_LEVEL, logging.INFO),
+    format="%(asctime)s | %(levelname)-8s | %(name)s | %(message)s",
+    datefmt="%Y-%m-%d %H:%M:%S",
+    handlers=[logging.StreamHandler(sys.stdout)],
+)
+logger = logging.getLogger("meetings-api")
 
 app = FastAPI(title="Meeting Transcription API")
 
@@ -142,59 +154,55 @@ bedrock_client = None
 def get_aws_clients():
     """Get AWS clients, initializing them if needed"""
     global s3_client, transcribe_client, bedrock_client
-    
+
     # Check if all clients are initialized, if not, reinitialize
     if not all([s3_client, transcribe_client, bedrock_client]):
         # Reset all clients to ensure clean initialization
         s3_client = None
         transcribe_client = None
         bedrock_client = None
-        
+
         try:
             # Get region from environment
             region = os.environ.get('AWS_REGION', 'us-east-1')
             # Verify credentials are set
             access_key = os.environ.get('AWS_ACCESS_KEY_ID')
             secret_key = os.environ.get('AWS_SECRET_ACCESS_KEY')
-            
+
             if not access_key or not secret_key:
                 raise ValueError("AWS_ACCESS_KEY_ID and AWS_SECRET_ACCESS_KEY must be set")
-            
-            print(f"🔧 Initializing AWS clients for region: {region}")
+
+            logger.info(f"Initializing AWS clients for region: {region}")
             # Create clients with explicit region and credentials from environment
-            print("  Creating S3 client...")
+            logger.debug("Creating S3 client...")
             s3_client = boto3.client('s3', region_name=region)
-            print("  ✅ S3 client created")
-            
-            print("  Creating Transcribe client...")
+            logger.debug("S3 client created successfully")
+
+            logger.debug("Creating Transcribe client...")
             transcribe_client = boto3.client('transcribe', region_name=region)
             if transcribe_client is None:
                 raise RuntimeError("Failed to create Transcribe client")
-            print("  ✅ Transcribe client created")
-            
-            print("  Creating Bedrock client...")
+            logger.debug("Transcribe client created successfully")
+
+            logger.debug("Creating Bedrock client...")
             bedrock_client = boto3.client('bedrock-runtime', region_name=region)
             if bedrock_client is None:
                 raise RuntimeError("Failed to create Bedrock client")
-            print("  ✅ Bedrock client created")
-            
+            logger.debug("Bedrock client created successfully")
+
             # Final verification
             if not all([s3_client, transcribe_client, bedrock_client]):
                 raise RuntimeError(f"Client initialization incomplete: S3={s3_client is not None}, Transcribe={transcribe_client is not None}, Bedrock={bedrock_client is not None}")
-            
-            print(f"✅ All AWS clients initialized successfully for region: {region}")
-            import sys
-            sys.stdout.flush()
+
+            logger.info(f"All AWS clients initialized successfully for region: {region}")
         except Exception as e:
             # Reset clients on failure to allow retry
             s3_client = None
             transcribe_client = None
             bedrock_client = None
-            print(f"❌ Failed to initialize AWS clients: {str(e)}")
-            import traceback
-            traceback.print_exc()
+            logger.error(f"Failed to initialize AWS clients: {str(e)}", exc_info=True)
             raise HTTPException(status_code=500, detail=f"AWS credentials not configured: {str(e)}")
-    
+
     return s3_client, transcribe_client, bedrock_client
 
 # Pydantic Models
@@ -329,22 +337,26 @@ def upload_to_s3(file_content, filename, bucket_name):
     """Upload file to S3 bucket"""
     timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
     file_key = f"meetings/{timestamp}_{filename}"
-    
+
     try:
+        logger.info(f"Uploading file to S3: bucket={bucket_name}, key={file_key}, size={len(file_content)} bytes")
         s3_client, _, _ = get_aws_clients()
         if s3_client is None:
             raise HTTPException(status_code=500, detail="AWS credentials not configured")
         s3_client.put_object(Bucket=bucket_name, Key=file_key, Body=file_content)
         file_uri = f"s3://{bucket_name}/{file_key}"
+        logger.info(f"File uploaded successfully: {file_uri}")
         return file_uri, file_key
     except HTTPException:
         raise
     except Exception as e:
+        logger.error(f"S3 upload failed: {str(e)}", exc_info=True)
         raise HTTPException(status_code=500, detail=f"S3 upload error: {str(e)}")
 
 def start_transcription_job(file_uri, job_name, media_format):
     """Start AWS Transcribe job with speaker identification"""
     try:
+        logger.info(f"Starting transcription job: name={job_name}, uri={file_uri}, format={media_format}")
         _, transcribe_client, _ = get_aws_clients()
         if transcribe_client is None:
             raise HTTPException(status_code=500, detail="AWS credentials not configured")
@@ -358,28 +370,36 @@ def start_transcription_job(file_uri, job_name, media_format):
                 'MaxSpeakerLabels': 10
             }
         )
+        logger.info(f"Transcription job started successfully: {job_name}")
         return True
     except HTTPException:
         raise
     except Exception as e:
+        logger.error(f"Failed to start transcription job: {str(e)}", exc_info=True)
         raise HTTPException(status_code=500, detail=f"Transcription error: {str(e)}")
 
 def check_transcription_status(job_name):
     """Check the status of transcription job"""
     try:
+        logger.debug(f"Checking transcription status for job: {job_name}")
         _, transcribe_client, _ = get_aws_clients()
         if transcribe_client is None:
+            logger.warning("Transcribe client not available")
             return None
         response = transcribe_client.get_transcription_job(
             TranscriptionJobName=job_name
         )
-        return response['TranscriptionJob']
+        job = response['TranscriptionJob']
+        logger.debug(f"Transcription job status: {job_name} -> {job['TranscriptionJobStatus']}")
+        return job
     except Exception as e:
+        logger.error(f"Failed to check transcription status for {job_name}: {str(e)}", exc_info=True)
         return None
 
 def get_transcription_result(transcript_uri):
     """Retrieve transcription result"""
     try:
+        logger.info(f"Retrieving transcription result from: {transcript_uri}")
         if transcript_uri.startswith("s3://"):
             s3_client, _, _ = get_aws_clients()
             if s3_client is None:
@@ -387,46 +407,53 @@ def get_transcription_result(transcript_uri):
             parts = transcript_uri.replace("s3://", "").split("/", 1)
             bucket = parts[0]
             key = parts[1]
+            logger.debug(f"Fetching transcript from S3: bucket={bucket}, key={key}")
             response = s3_client.get_object(Bucket=bucket, Key=key)
             transcript_data = json.loads(response['Body'].read().decode('utf-8'))
+            logger.info("Transcription result retrieved successfully from S3")
             return transcript_data
         else:
+            logger.debug(f"Fetching transcript from URL: {transcript_uri}")
             with urllib.request.urlopen(transcript_uri) as resp:
                 content_bytes = resp.read()
                 content_text = content_bytes.decode('utf-8')
                 transcript_data = json.loads(content_text)
+                logger.info("Transcription result retrieved successfully from URL")
                 return transcript_data
     except HTTPException:
         raise
     except Exception as e:
+        logger.error(f"Failed to retrieve transcription result: {str(e)}", exc_info=True)
         raise HTTPException(status_code=500, detail=f"Error retrieving transcription: {str(e)}")
 
 def format_transcript_with_speakers(transcript_data):
     """Format transcript with speaker labels"""
     try:
+        logger.debug("Formatting transcript with speaker labels")
         transcript_text = transcript_data['results']['transcripts'][0]['transcript']
         items = transcript_data['results']['items']
         speaker_segments = transcript_data['results']['speaker_labels']['segments']
-        
+
+        logger.debug(f"Found {len(speaker_segments)} speaker segments")
         formatted_transcript = []
         current_speaker = None
         current_text = []
-        
+
         for segment in speaker_segments:
             speaker = segment['speaker_label']
             segment_items = segment['items']
-            
+
             segment_text = []
             for item in segment_items:
                 start_time = float(item['start_time'])
-                
+
                 for word_item in items:
                     if word_item['type'] == 'pronunciation':
                         if 'start_time' in word_item and abs(float(word_item['start_time']) - start_time) < 0.01:
                             segment_text.append(word_item['alternatives'][0]['content'])
-                        
+
             text = ' '.join(segment_text)
-            
+
             if speaker != current_speaker:
                 if current_text:
                     formatted_transcript.append(f"\n{current_speaker}: {' '.join(current_text)}\n")
@@ -434,67 +461,108 @@ def format_transcript_with_speakers(transcript_data):
                 current_text = [text]
             else:
                 current_text.append(text)
-        
+
         if current_text:
             formatted_transcript.append(f"\n{current_speaker}: {' '.join(current_text)}\n")
-        
-        return ''.join(formatted_transcript), transcript_text
+
+        result = ''.join(formatted_transcript)
+        logger.info(f"Transcript formatted successfully: {len(result)} characters")
+        return result, transcript_text
     except Exception as e:
+        logger.error(f"Failed to format transcript: {str(e)}", exc_info=True)
         raise HTTPException(status_code=500, detail=f"Error formatting transcript: {str(e)}")
 
 def invoke_claude(prompt, max_tokens=4000):
-    """Invoke Claude via AWS Bedrock"""
-    try:
-        _, _, bedrock_client = get_aws_clients()
-        if bedrock_client is None:
-            raise HTTPException(status_code=500, detail="AWS credentials not configured")
-        request_body = {
-            "anthropic_version": "bedrock-2023-05-31",
-            "max_tokens": max_tokens,
-            "messages": [
-                {
-                    "role": "user",
-                    "content": [{"type": "text", "text": prompt}]
-                }
-            ]
-        }
-        
-        response = bedrock_client.invoke_model(
-            modelId='us.anthropic.claude-3-5-sonnet-20241022-v2:0',
-            accept='application/json',
-            contentType='application/json',
-            body=json.dumps(request_body)
-        )
-        
-        response_body = json.loads(response['body'].read())
-        text_blocks = [c.get('text', '') for c in response_body.get('content', []) if c.get('type') == 'text']
-        return "".join(text_blocks)
-    except HTTPException:
-        raise
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Claude error: {str(e)}")
+    """Invoke Claude via AWS Bedrock with retry logic for throttling"""
+    max_retries = int(os.environ.get('BEDROCK_MAX_RETRIES', '5'))
+    base_delay = float(os.environ.get('BEDROCK_BASE_DELAY', '2.0'))
+
+    logger.debug(f"Invoking Claude via Bedrock (prompt length: {len(prompt)} chars, max_tokens: {max_tokens})")
+    _, _, bedrock_client = get_aws_clients()
+    if bedrock_client is None:
+        raise HTTPException(status_code=500, detail="AWS credentials not configured")
+
+    request_body = {
+        "anthropic_version": "bedrock-2023-05-31",
+        "max_tokens": max_tokens,
+        "messages": [
+            {
+                "role": "user",
+                "content": [{"type": "text", "text": prompt}]
+            }
+        ]
+    }
+
+    # Use inference profile for Claude 3.5 Sonnet v2 (required for on-demand invocation)
+    # Format: us.anthropic.claude-3-5-sonnet-20241022-v2:0 for cross-region inference profile
+    model_id = os.environ.get('BEDROCK_MODEL_ID', 'us.anthropic.claude-3-5-sonnet-20241022-v2:0')
+    logger.debug(f"Using model: {model_id}")
+
+    last_exception = None
+    for attempt in range(max_retries):
+        try:
+            response = bedrock_client.invoke_model(
+                modelId=model_id,
+                accept='application/json',
+                contentType='application/json',
+                body=json.dumps(request_body)
+            )
+
+            response_body = json.loads(response['body'].read())
+            text_blocks = [c.get('text', '') for c in response_body.get('content', []) if c.get('type') == 'text']
+            result = "".join(text_blocks)
+            logger.info(f"Claude response received: {len(result)} characters")
+            return result
+
+        except bedrock_client.exceptions.ThrottlingException as e:
+            last_exception = e
+            delay = base_delay * (2 ** attempt)  # Exponential backoff: 2, 4, 8, 16, 32 seconds
+            logger.warning(f"Bedrock throttling (attempt {attempt + 1}/{max_retries}), retrying in {delay:.1f}s...")
+            time.sleep(delay)
+
+        except Exception as e:
+            # Check if it's a throttling error by message (in case exception type varies)
+            error_str = str(e).lower()
+            if 'throttl' in error_str or 'too many requests' in error_str or 'rate' in error_str:
+                last_exception = e
+                delay = base_delay * (2 ** attempt)
+                logger.warning(f"Bedrock rate limited (attempt {attempt + 1}/{max_retries}), retrying in {delay:.1f}s...")
+                time.sleep(delay)
+            else:
+                logger.error(f"Claude invocation failed: {str(e)}", exc_info=True)
+                raise HTTPException(status_code=500, detail=f"Claude error: {str(e)}")
+
+    # All retries exhausted
+    logger.error(f"Claude invocation failed after {max_retries} retries: {str(last_exception)}")
+    raise HTTPException(status_code=503, detail=f"Claude service temporarily unavailable (throttled). Please try again later.")
 
 def generate_summary(transcript):
     """Generate meeting summary using Claude"""
+    logger.info("Generating meeting summary")
     prompt = f"""Based on the following meeting transcript, provide a concise summary of the key discussion points, decisions made, and overall context of the meeting.
 
 Transcript:
 {transcript}
 
 Please provide a clear, well-structured summary."""
-    
-    return invoke_claude(prompt)
+
+    result = invoke_claude(prompt)
+    logger.info("Meeting summary generated successfully")
+    return result
 
 def extract_action_items(transcript):
     """Extract action items using Claude"""
+    logger.info("Extracting action items")
     prompt = f"""Based on the following meeting transcript, extract all action items, tasks, and follow-ups that were mentioned or assigned.
 
 Transcript:
 {transcript}
 
 Please list all action items in a clear, bullet-point format. Include who is responsible if mentioned, and any deadlines if specified."""
-    
-    return invoke_claude(prompt)
+
+    result = invoke_claude(prompt)
+    logger.info("Action items extracted successfully")
+    return result
 
 
 def _extract_speaker_labels(transcription: Optional[str]) -> list[str]:
@@ -714,6 +782,8 @@ async def create_session(
     session_id = str(uuid.uuid4())
     upload_date = datetime.now().isoformat()
 
+    logger.info(f"Creating new session: id={session_id}, title={title}, filename={file.filename}")
+
     db_session_obj = MeetingSessionDB(
         id=session_id,
         user_id=user.id,
@@ -725,41 +795,42 @@ async def create_session(
     db.add(db_session_obj)
     db.commit()
     db.refresh(db_session_obj)
-    
+
     # Process file asynchronously (in production, use background tasks)
     try:
         # Upload to S3
         file_content = await file.read()
+        logger.debug(f"File read: {len(file_content)} bytes")
         # Extract file extension safely
         if '.' in file.filename:
             file_extension = file.filename.split('.')[-1].lower()
         else:
             file_extension = 'mp3'  # Default extension
         media_format = file_extension if file_extension in ['mp3', 'mp4', 'wav', 'flac', 'ogg', 'm4a'] else 'mp3'
-        
+        logger.debug(f"Media format detected: {media_format}")
+
         file_uri, file_key = upload_to_s3(file_content, file.filename, S3_BUCKET)
-        
+
         # Update status
         db_session_obj.status = "transcribing"
-        
+        logger.info(f"Session {session_id}: status changed to transcribing")
+
         # Start transcription
         job_name = f"meeting_{session_id}_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
         start_transcription_job(file_uri, job_name, media_format)
         db_session_obj.job_name = job_name
-        
+
     except HTTPException as e:
         # HTTPException has detail in e.detail
         db_session_obj.status = "error"
         db_session_obj.error = e.detail if hasattr(e, 'detail') else str(e)
-        print(f"❌ Upload error (HTTPException): {db_session_obj.error}")
+        logger.error(f"Session {session_id}: upload error (HTTPException): {db_session_obj.error}")
     except Exception as e:
         # Regular exceptions
         db_session_obj.status = "error"
         error_msg = str(e) if str(e) else f"Unknown error: {type(e).__name__}"
         db_session_obj.error = error_msg
-        print(f"❌ Upload error: {error_msg}")
-        import traceback
-        traceback.print_exc()
+        logger.error(f"Session {session_id}: upload error: {error_msg}", exc_info=True)
     finally:
         db.add(db_session_obj)
         db.commit()
@@ -847,16 +918,16 @@ async def process_session(
     if not db_session_obj:
         raise HTTPException(status_code=404, detail="Session not found")
 
-    print(f"🔍 Processing session {session_id}, current status: {db_session_obj.status}")
+    logger.info(f"Processing session {session_id}, current status: {db_session_obj.status}")
 
     if db_session_obj.status == "transcribing":
-        print(f"📞 Checking transcription status for job: {db_session_obj.job_name}")
+        logger.debug(f"Checking transcription status for job: {db_session_obj.job_name}")
         # Check transcription status
         job = check_transcription_status(db_session_obj.job_name)
 
         if job:
             status_value = job["TranscriptionJobStatus"]
-            print(f"✅ AWS Transcribe job status: {status_value}")
+            logger.info(f"AWS Transcribe job status: {status_value}")
 
             if status_value == "COMPLETED":
                 # Get transcription
@@ -869,35 +940,47 @@ async def process_session(
                 db_session_obj.transcription = formatted_transcript
                 db_session_obj.original_transcription = formatted_transcript  # Store original
                 db_session_obj.status = "analyzing"
-                print(
-                    f"📝 Transcription complete, status changed to: {db_session_obj.status}"
-                )
+                logger.info(f"Transcription complete, status changed to: {db_session_obj.status}")
 
-                # Generate summary and action items
-                db_session_obj.summary = generate_summary(raw_transcript)
-                db_session_obj.action_items = extract_action_items(raw_transcript)
-                db_session_obj.status = "completed"
-                print(f"🎉 Analysis complete, final status: {db_session_obj.status}")
+                # Commit immediately so frontend can see transcript
+                db.add(db_session_obj)
+                db.commit()
+                db.refresh(db_session_obj)
 
             elif status_value == "FAILED":
                 db_session_obj.status = "error"
                 db_session_obj.error = job.get("FailureReason", "Unknown error")
-                print(f"❌ Transcription failed: {db_session_obj.error}")
+                logger.error(f"Transcription failed: {db_session_obj.error}")
         else:
             # AWS not configured - mark as error
-            print("⚠️ AWS credentials not configured, marking as error")
+            logger.warning("AWS credentials not configured, marking session as error")
             db_session_obj.status = "error"
             db_session_obj.error = (
                 "AWS credentials not configured. Cannot process transcription."
             )
+
+    elif db_session_obj.status == "analyzing":
+        # Perform AI analysis
+        logger.info(f"Starting AI analysis for session {session_id}")
+        try:
+            raw_transcript = db_session_obj.original_transcription or db_session_obj.transcription
+            db_session_obj.summary = generate_summary(raw_transcript)
+            db_session_obj.action_items = extract_action_items(raw_transcript)
+            db_session_obj.status = "completed"
+            logger.info(f"Analysis complete, final status: {db_session_obj.status}")
+        except Exception as e:
+            db_session_obj.status = "error"
+            db_session_obj.error = f"AI analysis failed: {str(e)}"
+            logger.error(f"AI analysis failed for session {session_id}: {str(e)}", exc_info=True)
+
     else:
-        print(f"⏭️ Skipping processing, status is: {db_session_obj.status}")
+        logger.debug(f"Skipping processing, status is: {db_session_obj.status}")
 
     db.add(db_session_obj)
     db.commit()
     db.refresh(db_session_obj)
 
-    print(f"📤 Returning session with status: {db_session_obj.status}")
+    logger.debug(f"Returning session with status: {db_session_obj.status}")
     return MeetingSession(
         id=db_session_obj.id,
         title=db_session_obj.title,
@@ -1008,6 +1091,199 @@ async def rename_speakers(
         duration=db_session_obj.duration,
         error=db_session_obj.error,
     )
+
+class StageActionRequest(BaseModel):
+    stage: str  # "transcription" or "analysis"
+
+
+@app.post("/api/sessions/{session_id}/stop", response_model=MeetingSession)
+async def stop_session_stage(
+    session_id: str,
+    request: StageActionRequest,
+    username: str = Depends(verify_token),
+    db: Session = Depends(get_db),
+):
+    """Stop a specific stage of session processing"""
+    user = db.query(User).filter(User.username == username).first()
+    if not user:
+        raise HTTPException(status_code=401, detail="Invalid credentials")
+
+    db_session_obj = (
+        db.query(MeetingSessionDB)
+        .filter(MeetingSessionDB.id == session_id, MeetingSessionDB.user_id == user.id)
+        .first()
+    )
+
+    if not db_session_obj:
+        raise HTTPException(status_code=404, detail="Session not found")
+
+    stage = request.stage.lower()
+    logger.info(f"Stopping {stage} stage for session {session_id}, current status: {db_session_obj.status}")
+
+    if stage == "transcription":
+        if db_session_obj.status != "transcribing":
+            raise HTTPException(status_code=400, detail="Session is not currently transcribing")
+
+        # Try to stop AWS Transcribe job
+        if db_session_obj.job_name:
+            try:
+                _, transcribe_client, _ = get_aws_clients()
+                if transcribe_client:
+                    # Note: AWS Transcribe doesn't support canceling jobs directly,
+                    # but we can delete the job after completion
+                    logger.info(f"Marking transcription job {db_session_obj.job_name} as stopped")
+            except Exception as e:
+                logger.warning(f"Could not interact with AWS Transcribe: {str(e)}")
+
+        db_session_obj.status = "stopped_transcription"
+        db_session_obj.error = "Transcription stopped by user"
+        logger.info(f"Session {session_id}: transcription stopped")
+
+    elif stage == "analysis":
+        if db_session_obj.status != "analyzing":
+            raise HTTPException(status_code=400, detail="Session is not currently analyzing")
+
+        db_session_obj.status = "stopped_analysis"
+        db_session_obj.error = "Analysis stopped by user"
+        logger.info(f"Session {session_id}: analysis stopped")
+
+    else:
+        raise HTTPException(status_code=400, detail="Invalid stage. Use 'transcription' or 'analysis'")
+
+    db.add(db_session_obj)
+    db.commit()
+    db.refresh(db_session_obj)
+
+    return MeetingSession(
+        id=db_session_obj.id,
+        title=db_session_obj.title,
+        filename=db_session_obj.filename,
+        upload_date=db_session_obj.upload_date,
+        status=db_session_obj.status,
+        transcription=db_session_obj.transcription,
+        summary=db_session_obj.summary,
+        action_items=db_session_obj.action_items,
+        duration=db_session_obj.duration,
+        error=db_session_obj.error,
+    )
+
+
+@app.post("/api/sessions/{session_id}/restart", response_model=MeetingSession)
+async def restart_session_stage(
+    session_id: str,
+    request: StageActionRequest,
+    username: str = Depends(verify_token),
+    db: Session = Depends(get_db),
+):
+    """Restart a specific stage of session processing"""
+    user = db.query(User).filter(User.username == username).first()
+    if not user:
+        raise HTTPException(status_code=401, detail="Invalid credentials")
+
+    db_session_obj = (
+        db.query(MeetingSessionDB)
+        .filter(MeetingSessionDB.id == session_id, MeetingSessionDB.user_id == user.id)
+        .first()
+    )
+
+    if not db_session_obj:
+        raise HTTPException(status_code=404, detail="Session not found")
+
+    stage = request.stage.lower()
+    logger.info(f"Restarting {stage} stage for session {session_id}, current status: {db_session_obj.status}")
+
+    if stage == "transcription":
+        # Can restart from stopped_transcription, error, or analyzing/completed (re-transcribe)
+        allowed_statuses = ["stopped_transcription", "error", "analyzing", "stopped_analysis", "completed"]
+        if db_session_obj.status not in allowed_statuses:
+            raise HTTPException(
+                status_code=400,
+                detail=f"Cannot restart transcription from status: {db_session_obj.status}"
+            )
+
+        # Clear previous data
+        db_session_obj.transcription = None
+        db_session_obj.original_transcription = None
+        db_session_obj.summary = None
+        db_session_obj.action_items = None
+        db_session_obj.error = None
+        db_session_obj.status = "transcribing"
+
+        # Start a new transcription job
+        # We need to re-use the existing file in S3 (job_name contains the info)
+        if db_session_obj.job_name:
+            try:
+                # Create a new job name
+                new_job_name = f"meeting_{session_id}_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
+
+                # Get the original file URI from the old job
+                _, transcribe_client, _ = get_aws_clients()
+                if transcribe_client:
+                    try:
+                        old_job = transcribe_client.get_transcription_job(
+                            TranscriptionJobName=db_session_obj.job_name
+                        )
+                        file_uri = old_job['TranscriptionJob']['Media']['MediaFileUri']
+                        media_format = old_job['TranscriptionJob'].get('MediaFormat', 'mp3')
+
+                        start_transcription_job(file_uri, new_job_name, media_format)
+                        db_session_obj.job_name = new_job_name
+                        logger.info(f"Session {session_id}: new transcription job started: {new_job_name}")
+                    except Exception as e:
+                        logger.error(f"Failed to get old job info: {str(e)}")
+                        raise HTTPException(
+                            status_code=500,
+                            detail="Could not restart transcription - original file info unavailable"
+                        )
+            except HTTPException:
+                raise
+            except Exception as e:
+                logger.error(f"Failed to restart transcription: {str(e)}", exc_info=True)
+                db_session_obj.status = "error"
+                db_session_obj.error = f"Failed to restart transcription: {str(e)}"
+        else:
+            raise HTTPException(status_code=400, detail="No transcription job found to restart")
+
+    elif stage == "analysis":
+        # Can restart from stopped_analysis, error, or completed (re-analyze)
+        allowed_statuses = ["stopped_analysis", "error", "completed", "analyzing"]
+        if db_session_obj.status not in allowed_statuses:
+            raise HTTPException(
+                status_code=400,
+                detail=f"Cannot restart analysis from status: {db_session_obj.status}"
+            )
+
+        # Must have transcription to analyze
+        if not db_session_obj.transcription and not db_session_obj.original_transcription:
+            raise HTTPException(status_code=400, detail="No transcription available for analysis")
+
+        # Clear previous analysis data
+        db_session_obj.summary = None
+        db_session_obj.action_items = None
+        db_session_obj.error = None
+        db_session_obj.status = "analyzing"
+        logger.info(f"Session {session_id}: analysis stage restarted")
+
+    else:
+        raise HTTPException(status_code=400, detail="Invalid stage. Use 'transcription' or 'analysis'")
+
+    db.add(db_session_obj)
+    db.commit()
+    db.refresh(db_session_obj)
+
+    return MeetingSession(
+        id=db_session_obj.id,
+        title=db_session_obj.title,
+        filename=db_session_obj.filename,
+        upload_date=db_session_obj.upload_date,
+        status=db_session_obj.status,
+        transcription=db_session_obj.transcription,
+        summary=db_session_obj.summary,
+        action_items=db_session_obj.action_items,
+        duration=db_session_obj.duration,
+        error=db_session_obj.error,
+    )
+
 
 @app.delete("/api/sessions/{session_id}")
 async def delete_session(

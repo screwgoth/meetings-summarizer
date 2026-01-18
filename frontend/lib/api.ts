@@ -92,25 +92,35 @@ export const sessionsAPI = {
     const response = await api.get('/api/sessions');
     return response.data;
   },
-  
+
   getOne: async (id: string): Promise<MeetingSession> => {
     const response = await api.get(`/api/sessions/${id}`);
     return response.data;
   },
-  
+
   create: async (title: string, file: File): Promise<MeetingSession> => {
     const formData = new FormData();
     formData.append('file', file);
     formData.append('title', title);
-    
+
     const response = await api.post('/api/sessions', formData, {
       headers: { 'Content-Type': 'multipart/form-data' },
     });
     return response.data;
   },
-  
+
   process: async (id: string): Promise<MeetingSession> => {
     const response = await api.post(`/api/sessions/${id}/process`);
+    return response.data;
+  },
+
+  stop: async (id: string, stage: 'transcription' | 'analysis'): Promise<MeetingSession> => {
+    const response = await api.post(`/api/sessions/${id}/stop`, { stage });
+    return response.data;
+  },
+
+  restart: async (id: string, stage: 'transcription' | 'analysis'): Promise<MeetingSession> => {
+    const response = await api.post(`/api/sessions/${id}/restart`, { stage });
     return response.data;
   },
 
@@ -118,7 +128,7 @@ export const sessionsAPI = {
     const response = await api.get(`/api/sessions/${id}/speakers`);
     return response.data as { labels: string[]; current_mappings: Record<string, string> };
   },
-  
+
   renameSpeakers: async (
     id: string,
     mapping: Record<string, string>,
@@ -126,7 +136,7 @@ export const sessionsAPI = {
     const response = await api.patch(`/api/sessions/${id}/speakers`, { mapping });
     return response.data;
   },
-  
+
   delete: async (id: string): Promise<void> => {
     await api.delete(`/api/sessions/${id}`);
   },
