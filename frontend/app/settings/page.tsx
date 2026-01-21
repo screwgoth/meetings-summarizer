@@ -2,7 +2,8 @@
 
 import { useEffect, useState } from 'react';
 import { useRouter } from 'next/navigation';
-import { adminAPI, usersAPI } from '@/lib/api';
+import { adminAPI } from '@/lib/api';
+import Layout from '@/components/Layout';
 
 interface ManagedUser {
   username: string;
@@ -28,43 +29,20 @@ export default function SettingsPage() {
   const [submitting, setSubmitting] = useState(false);
 
   useEffect(() => {
-    const init = async () => {
-      const token = localStorage.getItem('token');
-      if (!token) {
-        router.push('/login');
-        return;
-      }
-
-      try {
-        const profile = await usersAPI.getProfile();
-        if (!profile.is_admin) {
-          router.push('/dashboard');
-          return;
-        }
-        await loadUsers();
-      } catch (err: any) {
-        console.error('Failed to load settings', err);
-        if (err.response?.status === 401) {
-          localStorage.removeItem('token');
-          router.push('/login');
-        } else {
-          setError('Unable to load user management data.');
-        }
-      } finally {
-        setLoading(false);
-      }
-    };
-
-    init();
-  }, [router]);
+    loadUsers();
+  }, []);
 
   const loadUsers = async () => {
+    setLoading(true);
     try {
       const data = await adminAPI.listUsers();
       setUsers(data);
-    } catch (err) {
+      setError('');
+    } catch (err: any) {
       console.error('Failed to load users', err);
       setError('Unable to load user list.');
+    } finally {
+      setLoading(false);
     }
   };
 
@@ -102,176 +80,216 @@ export default function SettingsPage() {
     }
   };
 
-  if (loading) {
-    return (
-      <div className="min-h-screen flex items-center justify-center bg-gray-50">
-        <div className="text-center">
-          <div className="inline-block animate-spin rounded-full h-12 w-12 border-b-2 border-blue-600"></div>
-          <p className="mt-4 text-gray-600">Loading settings...</p>
-        </div>
-      </div>
-    );
-  }
-
-  if (error) {
-    return (
-      <div className="min-h-screen flex items-center justify-center bg-gray-50">
-        <div className="bg-white shadow rounded-lg p-6 max-w-md w-full text-center">
-          <p className="text-lg text-gray-700 mb-4">{error}</p>
-          <button
-            onClick={() => router.push('/dashboard')}
-            className="bg-blue-600 hover:bg-blue-700 text-white px-4 py-2 rounded-lg"
-          >
-            Back to Dashboard
-          </button>
-        </div>
-      </div>
-    );
-  }
-
   return (
-    <div className="min-h-screen bg-gray-50">
-      <header className="bg-white shadow-sm">
-        <div className="max-w-6xl mx-auto px-4 sm:px-6 lg:px-8 py-4 flex justify-between items-center">
-          <div>
-            <h1 className="text-2xl font-bold text-gray-900">Admin Settings</h1>
-            <p className="text-sm text-gray-500">Manage users and administrative settings.</p>
-          </div>
-          <button
-            onClick={() => router.push('/dashboard')}
-            className="bg-gray-200 hover:bg-gray-300 text-gray-700 px-4 py-2 rounded-lg font-semibold transition"
-          >
-            Back to Dashboard
-          </button>
+    <Layout requireAdmin>
+      <div className="p-4 sm:p-6 lg:p-8 max-w-6xl mx-auto">
+        {/* Page Header */}
+        <div className="mb-8">
+          <h1 className="text-2xl sm:text-3xl font-bold text-gray-900 dark:text-white">
+            User Management
+          </h1>
+          <p className="mt-2 text-gray-600 dark:text-gray-400">
+            Create and manage user accounts
+          </p>
         </div>
-      </header>
 
-      <main className="max-w-6xl mx-auto px-4 sm:px-6 lg:px-8 py-8 space-y-8">
-        <section className="bg-white rounded-lg shadow p-6">
-          <h2 className="text-xl font-semibold text-gray-800 mb-4">Add New User</h2>
+        {error && (
+          <div className="alert alert-error mb-6">
+            {error}
+          </div>
+        )}
+
+        {/* Add New User Card */}
+        <div className="card p-6 mb-8">
+          <div className="flex items-center gap-3 mb-6">
+            <div className="w-10 h-10 bg-indigo-100 dark:bg-indigo-900/30 rounded-lg flex items-center justify-center">
+              <svg className="w-5 h-5 text-indigo-600 dark:text-indigo-400" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M18 9v3m0 0v3m0-3h3m-3 0h-3m-2-5a4 4 0 11-8 0 4 4 0 018 0zM3 20a6 6 0 0112 0v1H3v-1z" />
+              </svg>
+            </div>
+            <div>
+              <h2 className="text-lg font-semibold text-gray-900 dark:text-white">Add New User</h2>
+              <p className="text-sm text-gray-500 dark:text-gray-400">Create a new user account</p>
+            </div>
+          </div>
+
           <form onSubmit={handleCreateUser} className="space-y-4">
             {formError && (
-              <div className="bg-red-50 border border-red-200 text-red-700 px-4 py-2 rounded">
-                {formError}
-              </div>
+              <div className="alert alert-error text-sm">{formError}</div>
             )}
             {formSuccess && (
-              <div className="bg-green-50 border border-green-200 text-green-700 px-4 py-2 rounded">
-                {formSuccess}
-              </div>
+              <div className="alert alert-success text-sm">{formSuccess}</div>
             )}
 
             <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
               <div>
-                <label className="block text-sm font-medium text-gray-700 mb-2">Username *</label>
+                <label className="block text-sm font-medium text-gray-700 dark:text-gray-300 mb-2">
+                  Username <span className="text-red-500">*</span>
+                </label>
                 <input
                   type="text"
                   value={username}
                   onChange={(e) => setUsername(e.target.value)}
-                  className="w-full px-4 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-transparent"
+                  className="input"
                   placeholder="jane.doe"
                   required
                 />
               </div>
 
               <div>
-                <label className="block text-sm font-medium text-gray-700 mb-2">Email</label>
-                <input
-                  type="email"
-                  value={email}
-                  onChange={(e) => setEmail(e.target.value)}
-                  className="w-full px-4 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-transparent"
-                  placeholder="jane@example.com"
-                />
-              </div>
-
-              <div>
-                <label className="block text-sm font-medium text-gray-700 mb-2">Full Name</label>
-                <input
-                  type="text"
-                  value={fullName}
-                  onChange={(e) => setFullName(e.target.value)}
-                  className="w-full px-4 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-transparent"
-                  placeholder="Jane Doe"
-                />
-              </div>
-
-              <div>
-                <label className="block text-sm font-medium text-gray-700 mb-2">Password *</label>
+                <label className="block text-sm font-medium text-gray-700 dark:text-gray-300 mb-2">
+                  Password <span className="text-red-500">*</span>
+                </label>
                 <input
                   type="password"
                   value={password}
                   onChange={(e) => setPassword(e.target.value)}
-                  className="w-full px-4 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-transparent"
+                  className="input"
                   placeholder="Minimum 8 characters"
                   minLength={8}
                   required
                 />
               </div>
+
+              <div>
+                <label className="block text-sm font-medium text-gray-700 dark:text-gray-300 mb-2">
+                  Full Name
+                </label>
+                <input
+                  type="text"
+                  value={fullName}
+                  onChange={(e) => setFullName(e.target.value)}
+                  className="input"
+                  placeholder="Jane Doe"
+                />
+              </div>
+
+              <div>
+                <label className="block text-sm font-medium text-gray-700 dark:text-gray-300 mb-2">
+                  Email
+                </label>
+                <input
+                  type="email"
+                  value={email}
+                  onChange={(e) => setEmail(e.target.value)}
+                  className="input"
+                  placeholder="jane@example.com"
+                />
+              </div>
             </div>
 
-            <label className="inline-flex items-center">
-              <input
-                type="checkbox"
-                checked={isAdmin}
-                onChange={(e) => setIsAdmin(e.target.checked)}
-                className="h-4 w-4 text-blue-600 focus:ring-blue-500 border-gray-300 rounded"
-              />
-              <span className="ml-2 text-sm text-gray-700">Grant admin access</span>
-            </label>
+            <div className="flex items-center gap-3 pt-2">
+              <label className="relative inline-flex items-center cursor-pointer">
+                <input
+                  type="checkbox"
+                  checked={isAdmin}
+                  onChange={(e) => setIsAdmin(e.target.checked)}
+                  className="sr-only peer"
+                />
+                <div className="w-11 h-6 bg-gray-200 peer-focus:outline-none peer-focus:ring-4 peer-focus:ring-indigo-300 dark:peer-focus:ring-indigo-800 rounded-full peer dark:bg-gray-700 peer-checked:after:translate-x-full peer-checked:after:border-white after:content-[''] after:absolute after:top-[2px] after:left-[2px] after:bg-white after:border-gray-300 after:border after:rounded-full after:h-5 after:w-5 after:transition-all dark:border-gray-600 peer-checked:bg-indigo-600"></div>
+                <span className="ml-3 text-sm font-medium text-gray-700 dark:text-gray-300">Grant admin access</span>
+              </label>
+            </div>
 
-            <div>
+            <div className="pt-4">
               <button
                 type="submit"
                 disabled={submitting}
-                className="bg-blue-600 hover:bg-blue-700 text-white px-6 py-3 rounded-lg font-semibold transition disabled:bg-gray-400"
+                className="btn-primary"
               >
-                {submitting ? 'Creating...' : 'Create User'}
+                {submitting ? (
+                  <span className="flex items-center gap-2">
+                    <div className="w-4 h-4 spinner border-2"></div>
+                    Creating...
+                  </span>
+                ) : (
+                  'Create User'
+                )}
               </button>
             </div>
           </form>
-        </section>
+        </div>
 
-        <section className="bg-white rounded-lg shadow p-6">
-          <div className="flex justify-between items-center mb-4">
-            <h2 className="text-xl font-semibold text-gray-800">Existing Users</h2>
+        {/* Users List Card */}
+        <div className="card p-6">
+          <div className="flex items-center justify-between mb-6">
+            <div className="flex items-center gap-3">
+              <div className="w-10 h-10 bg-purple-100 dark:bg-purple-900/30 rounded-lg flex items-center justify-center">
+                <svg className="w-5 h-5 text-purple-600 dark:text-purple-400" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 4.354a4 4 0 110 5.292M15 21H3v-1a6 6 0 0112 0v1zm0 0h6v-1a6 6 0 00-9-5.197M13 7a4 4 0 11-8 0 4 4 0 018 0z" />
+                </svg>
+              </div>
+              <div>
+                <h2 className="text-lg font-semibold text-gray-900 dark:text-white">All Users</h2>
+                <p className="text-sm text-gray-500 dark:text-gray-400">{users.length} users total</p>
+              </div>
+            </div>
             <button
               onClick={loadUsers}
-              className="bg-gray-100 hover:bg-gray-200 text-gray-700 px-4 py-2 rounded-lg text-sm font-semibold transition"
+              disabled={loading}
+              className="btn-secondary text-sm flex items-center gap-2"
             >
+              <svg className={`w-4 h-4 ${loading ? 'animate-spin' : ''}`} fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15" />
+              </svg>
               Refresh
             </button>
           </div>
 
-          {users.length === 0 ? (
-            <p className="text-gray-500">No users found.</p>
+          {loading ? (
+            <div className="flex items-center justify-center py-12">
+              <div className="w-8 h-8 spinner"></div>
+            </div>
+          ) : users.length === 0 ? (
+            <div className="text-center py-12">
+              <div className="w-16 h-16 mx-auto mb-4 bg-gray-100 dark:bg-gray-800 rounded-full flex items-center justify-center">
+                <svg className="w-8 h-8 text-gray-400" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M17 20h5v-2a3 3 0 00-5.356-1.857M17 20H7m10 0v-2c0-.656-.126-1.283-.356-1.857M7 20H2v-2a3 3 0 015.356-1.857M7 20v-2c0-.656.126-1.283.356-1.857m0 0a5.002 5.002 0 019.288 0M15 7a3 3 0 11-6 0 3 3 0 016 0zm6 3a2 2 0 11-4 0 2 2 0 014 0zM7 10a2 2 0 11-4 0 2 2 0 014 0z" />
+                </svg>
+              </div>
+              <p className="text-gray-500 dark:text-gray-400">No users found</p>
+            </div>
           ) : (
-            <div className="overflow-x-auto">
-              <table className="min-w-full divide-y divide-gray-200">
-                <thead className="bg-gray-50">
-                  <tr>
-                    <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Username</th>
-                    <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Full Name</th>
-                    <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Email</th>
-                    <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Admin</th>
-                    <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Must Change Password</th>
+            <div className="overflow-x-auto -mx-6 px-6">
+              <table className="min-w-full">
+                <thead>
+                  <tr className="border-b border-gray-200 dark:border-gray-700">
+                    <th className="text-left py-3 px-4 text-xs font-semibold text-gray-500 dark:text-gray-400 uppercase tracking-wider">User</th>
+                    <th className="text-left py-3 px-4 text-xs font-semibold text-gray-500 dark:text-gray-400 uppercase tracking-wider">Email</th>
+                    <th className="text-left py-3 px-4 text-xs font-semibold text-gray-500 dark:text-gray-400 uppercase tracking-wider">Role</th>
+                    <th className="text-left py-3 px-4 text-xs font-semibold text-gray-500 dark:text-gray-400 uppercase tracking-wider">Status</th>
                   </tr>
                 </thead>
-                <tbody className="bg-white divide-y divide-gray-200">
+                <tbody className="divide-y divide-gray-100 dark:divide-gray-800">
                   {users.map((user) => (
-                    <tr key={user.username}>
-                      <td className="px-6 py-4 whitespace-nowrap text-sm text-gray-900">{user.username}</td>
-                      <td className="px-6 py-4 whitespace-nowrap text-sm text-gray-500">{user.full_name || '—'}</td>
-                      <td className="px-6 py-4 whitespace-nowrap text-sm text-gray-500">{user.email || '—'}</td>
-                      <td className="px-6 py-4 whitespace-nowrap text-sm">
-                        <span className={`px-2 inline-flex text-xs leading-5 font-semibold rounded-full ${user.is_admin ? 'bg-purple-100 text-purple-800' : 'bg-gray-100 text-gray-800'}`}>
-                          {user.is_admin ? 'Yes' : 'No'}
+                    <tr key={user.username} className="hover:bg-gray-50 dark:hover:bg-gray-800/50 transition-colors">
+                      <td className="py-4 px-4">
+                        <div className="flex items-center gap-3">
+                          <div className="w-10 h-10 bg-gradient-to-br from-indigo-400 to-purple-500 rounded-full flex items-center justify-center flex-shrink-0">
+                            <span className="text-sm font-medium text-white">
+                              {user.full_name?.[0] || user.username[0].toUpperCase()}
+                            </span>
+                          </div>
+                          <div>
+                            <p className="font-medium text-gray-900 dark:text-white">{user.username}</p>
+                            <p className="text-sm text-gray-500 dark:text-gray-400">{user.full_name || 'No name set'}</p>
+                          </div>
+                        </div>
+                      </td>
+                      <td className="py-4 px-4">
+                        <span className="text-gray-600 dark:text-gray-400">{user.email || '—'}</span>
+                      </td>
+                      <td className="py-4 px-4">
+                        <span className={`badge ${user.is_admin ? 'badge-purple' : 'bg-gray-100 dark:bg-gray-800 text-gray-600 dark:text-gray-400'}`}>
+                          {user.is_admin ? 'Admin' : 'User'}
                         </span>
                       </td>
-                      <td className="px-6 py-4 whitespace-nowrap text-sm">
-                        <span className={`px-2 inline-flex text-xs leading-5 font-semibold rounded-full ${user.must_change_password ? 'bg-yellow-100 text-yellow-800' : 'bg-green-100 text-green-800'}`}>
-                          {user.must_change_password ? 'Required' : 'Not required'}
-                        </span>
+                      <td className="py-4 px-4">
+                        {user.must_change_password ? (
+                          <span className="badge badge-warning">Password change required</span>
+                        ) : (
+                          <span className="badge badge-success">Active</span>
+                        )}
                       </td>
                     </tr>
                   ))}
@@ -279,9 +297,8 @@ export default function SettingsPage() {
               </table>
             </div>
           )}
-        </section>
-      </main>
-    </div>
+        </div>
+      </div>
+    </Layout>
   );
 }
-
