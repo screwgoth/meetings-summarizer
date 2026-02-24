@@ -5,6 +5,59 @@ import { useRouter, useParams } from 'next/navigation';
 import { sessionsAPI, MeetingSession, usersAPI } from '@/lib/api';
 import { format } from 'date-fns';
 
+// Collapsible Section Component
+function CollapsibleSection({ 
+  title, 
+  icon, 
+  content, 
+  onDownload, 
+  defaultOpen = false 
+}: { 
+  title: string; 
+  icon: string; 
+  content: string; 
+  onDownload?: () => void; 
+  defaultOpen?: boolean;
+}) {
+  const [isOpen, setIsOpen] = useState(defaultOpen);
+
+  return (
+    <div className="bg-white rounded-lg shadow">
+      <div 
+        className="flex justify-between items-center p-6 cursor-pointer hover:bg-gray-50 transition"
+        onClick={() => setIsOpen(!isOpen)}
+      >
+        <div className="flex items-center gap-2">
+          <h2 className="text-xl font-bold text-gray-800">{icon} {title}</h2>
+          <span className="text-gray-400 text-sm">
+            {isOpen ? '▼' : '▶'}
+          </span>
+        </div>
+        {onDownload && (
+          <button
+            onClick={(e) => {
+              e.stopPropagation();
+              onDownload();
+            }}
+            className="bg-blue-600 hover:bg-blue-700 text-white px-4 py-2 rounded-lg text-sm transition"
+          >
+            Download
+          </button>
+        )}
+      </div>
+      {isOpen && (
+        <div className="px-6 pb-6">
+          <div className="bg-gray-50 rounded p-4 max-h-96 overflow-y-auto">
+            <pre className="whitespace-pre-wrap text-sm text-gray-700 font-mono">
+              {content}
+            </pre>
+          </div>
+        </div>
+      )}
+    </div>
+  );
+}
+
 export default function SessionDetailPage() {
   const params = useParams();
   const router = useRouter();
@@ -545,58 +598,46 @@ export default function SessionDetailPage() {
       <main className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 py-8 space-y-6">
         {/* Transcription */}
         {session.transcription && (
-          <div className="bg-white rounded-lg shadow p-6">
-            <div className="flex justify-between items-center mb-4">
-              <h2 className="text-xl font-bold text-gray-800">📝 Transcription</h2>
-              <button
-                onClick={() => downloadText(session.transcription!, `transcript-${session.id}.txt`)}
-                className="bg-blue-600 hover:bg-blue-700 text-white px-4 py-2 rounded-lg text-sm"
-              >
-                Download
-              </button>
-            </div>
-            <div className="bg-gray-50 rounded p-4 max-h-96 overflow-y-auto">
-              <pre className="whitespace-pre-wrap text-sm text-gray-700 font-mono">
-                {session.transcription}
-              </pre>
-            </div>
-          </div>
+          <CollapsibleSection
+            title="Transcription"
+            icon="📝"
+            content={session.transcription}
+            onDownload={() => downloadText(session.transcription!, `transcript-${session.id}.txt`)}
+            defaultOpen={true}
+          />
         )}
 
         {/* Summary */}
         {session.summary && (
-          <div className="bg-white rounded-lg shadow p-6">
-            <div className="flex justify-between items-center mb-4">
-              <h2 className="text-xl font-bold text-gray-800">📊 Summary</h2>
-              <button
-                onClick={() => downloadText(session.summary!, `summary-${session.id}.txt`)}
-                className="bg-blue-600 hover:bg-blue-700 text-white px-4 py-2 rounded-lg text-sm"
-              >
-                Download
-              </button>
-            </div>
-            <div className="prose max-w-none">
-              <p className="text-gray-700 whitespace-pre-wrap">{session.summary}</p>
-            </div>
-          </div>
+          <CollapsibleSection
+            title="Summary"
+            icon="📊"
+            content={session.summary}
+            onDownload={() => downloadText(session.summary!, `summary-${session.id}.txt`)}
+            defaultOpen={true}
+          />
         )}
 
         {/* Action Items */}
         {session.action_items && (
-          <div className="bg-white rounded-lg shadow p-6">
-            <div className="flex justify-between items-center mb-4">
-              <h2 className="text-xl font-bold text-gray-800">✅ Action Items</h2>
-              <button
-                onClick={() => downloadText(session.action_items!, `action-items-${session.id}.txt`)}
-                className="bg-blue-600 hover:bg-blue-700 text-white px-4 py-2 rounded-lg text-sm"
-              >
-                Download
-              </button>
-            </div>
-            <div className="prose max-w-none">
-              <p className="text-gray-700 whitespace-pre-wrap">{session.action_items}</p>
-            </div>
-          </div>
+          <CollapsibleSection
+            title="Action Items"
+            icon="✅"
+            content={session.action_items}
+            onDownload={() => downloadText(session.action_items!, `action-items-${session.id}.txt`)}
+            defaultOpen={true}
+          />
+        )}
+
+        {/* Sentiment Analysis */}
+        {session.sentiment_analysis && (
+          <CollapsibleSection
+            title="Sentiment Analysis"
+            icon="😊"
+            content={session.sentiment_analysis}
+            onDownload={() => downloadText(session.sentiment_analysis!, `sentiment-${session.id}.txt`)}
+            defaultOpen={false}
+          />
         )}
       </main>
     </div>

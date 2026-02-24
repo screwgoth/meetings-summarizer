@@ -42,7 +42,11 @@ app = FastAPI(title="Meeting Transcription API")
 # CORS configuration
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["http://localhost:3000"],
+    allow_origins=[
+        "http://localhost:3000",
+        "http://184.72.155.50:3000",
+        "http://184.72.155.50:8000",
+    ],
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
@@ -99,12 +103,22 @@ class MeetingSessionDB(Base):
     original_transcription = Column(Text, nullable=True)  # Store original before mappings
     summary = Column(Text, nullable=True)
     action_items = Column(Text, nullable=True)
+    sentiment_analysis = Column(Text, nullable=True)
     duration = Column(String(64), nullable=True)
     job_name = Column(String(255), nullable=True)
     error = Column(Text, nullable=True)
     speaker_mappings = Column(Text, nullable=True)  # JSON string: {"spk_0": "John", "spk_1": "Jane"}
 
     user = relationship("User", back_populates="sessions")
+
+
+class Settings(Base):
+    __tablename__ = "settings"
+
+    id = Column(Integer, primary_key=True, index=True)
+    key = Column(String(255), unique=True, index=True, nullable=False)
+    value = Column(Text, nullable=True)
+    updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow, nullable=False)
 
 
 def get_db():
@@ -151,6 +165,23 @@ transcribe_client = None
 bedrock_client = None
 
 
+def get_aws_credentials_from_db(db: Session):
+    """Get AWS credentials from database settings"""
+    access_key = db.query(Settings).filter(Settings.key == "AWS_ACCESS_KEY_ID").first()
+    secret_key = db.query(Settings).filter(Settings.key == "AWS_SECRET_ACCESS_KEY").first()
+    region = db.query(Settings).filter(Settings.key == "AWS_REGION").first()
+    bucket = db.query(Settings).filter(Settings.key == "S3_BUCKET_NAME").first()
+    bedrock_token = db.query(Settings).filter(Settings.key == "BEDROCK_BEARER_TOKEN").first()
+    
+    return {
+        'access_key': access_key.value if access_key else None,
+        'secret_key': secret_key.value if secret_key else None,
+        'region': region.value if region else 'us-east-1',
+        'bucket': bucket.value if bucket else None,
+        'bedrock_token': bedrock_token.value if bedrock_token else None,
+    }
+
+
 def get_aws_clients():
     """Get AWS clients, initializing them if needed"""
     global s3_client, transcribe_client, bedrock_client
@@ -163,12 +194,17 @@ def get_aws_clients():
         bedrock_client = None
 
         try:
-            # Get region from environment
-            region = os.environ.get('AWS_REGION', 'us-east-1')
+            # Try to get credentials from database first
+            db = SessionLocal()
+            try:
+                db_creds = get_aws_credentials_from_db(db)
+                access_key = db_creds['access_key'] or os.environ.get('AWS_ACCESS_KEY_ID')
+                secret_key = db_creds['secret_key'] or os.environ.get('AWS_SECRET_ACCESS_KEY')
+                region = db_creds['region'] or os.environ.get('AWS_REGION', 'us-east-1')
+            finally:
+                db.close()
+            
             # Verify credentials are set
-            access_key = os.environ.get('AWS_ACCESS_KEY_ID')
-            secret_key = os.environ.get('AWS_SECRET_ACCESS_KEY')
-
             if not access_key or not secret_key:
                 raise ValueError("AWS_ACCESS_KEY_ID and AWS_SECRET_ACCESS_KEY must be set")
 
@@ -223,6 +259,7 @@ class MeetingSession(BaseModel):
     transcription: Optional[str] = None
     summary: Optional[str] = None
     action_items: Optional[str] = None
+    sentiment_analysis: Optional[str] = None
     duration: Optional[str] = None
     error: Optional[str] = None
 
@@ -278,6 +315,24 @@ class UserSummary(BaseModel):
     full_name: Optional[str]
     is_admin: bool
     must_change_password: bool
+
+
+class AWSCredentialsRequest(BaseModel):
+    aws_access_key_id: Optional[str] = None
+    aws_secret_access_key: Optional[str] = None
+    aws_region: Optional[str] = None
+    s3_bucket_name: Optional[str] = None
+    bedrock_bearer_token: Optional[str] = None
+
+
+class AWSCredentialsResponse(BaseModel):
+    aws_access_key_id: Optional[str] = None
+    aws_secret_access_key_masked: Optional[str] = None
+    aws_region: Optional[str] = None
+    s3_bucket_name: Optional[str] = None
+    bedrock_bearer_token: Optional[str] = None
+    is_configured: bool
+
 
 # Authentication functions
 def verify_password(plain_password, hashed_password):
@@ -565,6 +620,28 @@ Please list all action items in a clear, bullet-point format. Include who is res
     return result
 
 
+def analyze_sentiment(transcript):
+    """Analyze sentiment and tone of the meeting using Claude"""
+    logger.info("Analyzing sentiment")
+    prompt = f"""Based on the following meeting transcript, analyze the overall sentiment, tone, and emotional dynamics of the conversation.
+
+Transcript:
+{transcript}
+
+Please provide an analysis covering:
+• Overall sentiment (positive, neutral, negative, or mixed)
+• Tone of the discussion (collaborative, tense, productive, casual, etc.)
+• Key emotional moments or shifts in tone
+• Engagement level and participation balance
+• Any concerns or friction points that emerged
+
+Keep the analysis professional, objective, and actionable."""
+
+    result = invoke_claude(prompt)
+    logger.info("Sentiment analysis completed successfully")
+    return result
+
+
 def _extract_speaker_labels(transcription: Optional[str]) -> list[str]:
     """Extract unique speaker labels from transcription text."""
     if not transcription:
@@ -730,6 +807,130 @@ async def create_user(
         must_change_password=True,
     )
 
+
+@app.get("/api/admin/aws-credentials", response_model=AWSCredentialsResponse)
+async def get_aws_credentials(
+    _admin=Depends(require_admin),
+    db: Session = Depends(get_db),
+):
+    """Get AWS credentials (admin only) - secret key is masked"""
+    creds = get_aws_credentials_from_db(db)
+    
+    # Mask secret key for security
+    secret_masked = None
+    if creds['secret_key']:
+        secret_masked = creds['secret_key'][:4] + "*" * (len(creds['secret_key']) - 8) + creds['secret_key'][-4:]
+    
+    is_configured = bool(creds['access_key'] and creds['secret_key'] and creds['bucket'])
+    
+    return AWSCredentialsResponse(
+        aws_access_key_id=creds['access_key'],
+        aws_secret_access_key_masked=secret_masked,
+        aws_region=creds['region'],
+        s3_bucket_name=creds['bucket'],
+        bedrock_bearer_token=creds['bedrock_token'],
+        is_configured=is_configured,
+    )
+
+
+@app.put("/api/admin/aws-credentials")
+async def update_aws_credentials(
+    request: AWSCredentialsRequest,
+    _admin=Depends(require_admin),
+    db: Session = Depends(get_db),
+):
+    """Update AWS credentials (admin only)"""
+    global s3_client, transcribe_client, bedrock_client
+    
+    # Update each credential if provided
+    if request.aws_access_key_id is not None:
+        setting = db.query(Settings).filter(Settings.key == "AWS_ACCESS_KEY_ID").first()
+        if setting:
+            setting.value = request.aws_access_key_id
+            setting.updated_at = datetime.utcnow()
+        else:
+            db.add(Settings(key="AWS_ACCESS_KEY_ID", value=request.aws_access_key_id))
+    
+    if request.aws_secret_access_key is not None:
+        setting = db.query(Settings).filter(Settings.key == "AWS_SECRET_ACCESS_KEY").first()
+        if setting:
+            setting.value = request.aws_secret_access_key
+            setting.updated_at = datetime.utcnow()
+        else:
+            db.add(Settings(key="AWS_SECRET_ACCESS_KEY", value=request.aws_secret_access_key))
+    
+    if request.aws_region is not None:
+        setting = db.query(Settings).filter(Settings.key == "AWS_REGION").first()
+        if setting:
+            setting.value = request.aws_region
+            setting.updated_at = datetime.utcnow()
+        else:
+            db.add(Settings(key="AWS_REGION", value=request.aws_region))
+    
+    if request.s3_bucket_name is not None:
+        setting = db.query(Settings).filter(Settings.key == "S3_BUCKET_NAME").first()
+        if setting:
+            setting.value = request.s3_bucket_name
+            setting.updated_at = datetime.utcnow()
+        else:
+            db.add(Settings(key="S3_BUCKET_NAME", value=request.s3_bucket_name))
+    
+    if request.bedrock_bearer_token is not None:
+        setting = db.query(Settings).filter(Settings.key == "BEDROCK_BEARER_TOKEN").first()
+        if setting:
+            setting.value = request.bedrock_bearer_token
+            setting.updated_at = datetime.utcnow()
+        else:
+            db.add(Settings(key="BEDROCK_BEARER_TOKEN", value=request.bedrock_bearer_token))
+    
+    db.commit()
+    
+    # Reset AWS clients to force re-initialization with new credentials
+    s3_client = None
+    transcribe_client = None
+    bedrock_client = None
+    
+    return {"message": "AWS credentials updated successfully"}
+
+
+@app.post("/api/admin/aws-credentials/test")
+async def test_aws_credentials(
+    _admin=Depends(require_admin),
+    db: Session = Depends(get_db),
+):
+    """Test AWS credentials by attempting to list S3 buckets (admin only)"""
+    global s3_client, transcribe_client, bedrock_client
+    
+    # Reset clients to force re-initialization
+    s3_client = None
+    transcribe_client = None
+    bedrock_client = None
+    
+    try:
+        s3, transcribe, bedrock = get_aws_clients()
+        
+        # Test S3 access
+        s3.list_buckets()
+        
+        # Test Transcribe access
+        transcribe.list_transcription_jobs(MaxResults=1)
+        
+        # Test Bedrock access (just check if client is created)
+        if not bedrock:
+            raise ValueError("Bedrock client not initialized")
+        
+        return {
+            "success": True,
+            "message": "AWS credentials are valid and all services are accessible"
+        }
+    except Exception as e:
+        logger.error(f"AWS credentials test failed: {str(e)}")
+        return {
+            "success": False,
+            "message": f"AWS credentials test failed: {str(e)}"
+        }
+
+
 @app.get("/api/sessions", response_model=List[MeetingSession])
 async def get_sessions(
     username: str = Depends(verify_token),
@@ -875,6 +1076,7 @@ async def get_session(
     transcription = source_transcription
     summary = db_session_obj.summary
     action_items = db_session_obj.action_items
+    sentiment_analysis = db_session_obj.sentiment_analysis
     
     if db_session_obj.speaker_mappings:
         try:
@@ -882,6 +1084,7 @@ async def get_session(
             transcription = _apply_speaker_mapping(source_transcription, mapping)
             summary = _apply_speaker_mapping(summary, mapping)
             action_items = _apply_speaker_mapping(action_items, mapping)
+            sentiment_analysis = _apply_speaker_mapping(sentiment_analysis, mapping)
         except json.JSONDecodeError:
             pass  # Invalid JSON, ignore
 
@@ -894,6 +1097,7 @@ async def get_session(
         transcription=transcription,
         summary=summary,
         action_items=action_items,
+        sentiment_analysis=sentiment_analysis,
         duration=db_session_obj.duration,
         error=db_session_obj.error,
     )
@@ -966,6 +1170,7 @@ async def process_session(
             raw_transcript = db_session_obj.original_transcription or db_session_obj.transcription
             db_session_obj.summary = generate_summary(raw_transcript)
             db_session_obj.action_items = extract_action_items(raw_transcript)
+            db_session_obj.sentiment_analysis = analyze_sentiment(raw_transcript)
             db_session_obj.status = "completed"
             logger.info(f"Analysis complete, final status: {db_session_obj.status}")
         except Exception as e:
@@ -1066,13 +1271,16 @@ async def rename_speakers(
         # First time mapping - store original
         db_session_obj.original_transcription = db_session_obj.transcription
     
-    # Apply mapping to original transcription, summary, and action items
+    # Apply mapping to original transcription, summary, action items, and sentiment analysis
     db_session_obj.transcription = _apply_speaker_mapping(
         original_transcription, mapping
     )
     db_session_obj.summary = _apply_speaker_mapping(db_session_obj.summary, mapping)
     db_session_obj.action_items = _apply_speaker_mapping(
         db_session_obj.action_items, mapping
+    )
+    db_session_obj.sentiment_analysis = _apply_speaker_mapping(
+        db_session_obj.sentiment_analysis, mapping
     )
 
     db.add(db_session_obj)
@@ -1088,6 +1296,7 @@ async def rename_speakers(
         transcription=db_session_obj.transcription,
         summary=db_session_obj.summary,
         action_items=db_session_obj.action_items,
+        sentiment_analysis=db_session_obj.sentiment_analysis,
         duration=db_session_obj.duration,
         error=db_session_obj.error,
     )

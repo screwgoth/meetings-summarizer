@@ -1,6 +1,26 @@
 import axios from 'axios';
 
-const API_BASE_URL = process.env.NEXT_PUBLIC_API_URL || 'http://localhost:8000';
+// Determine API URL based on environment
+const getAPIBaseURL = () => {
+  // Build-time env var takes precedence
+  if (process.env.NEXT_PUBLIC_API_URL) {
+    return process.env.NEXT_PUBLIC_API_URL;
+  }
+  
+  // Runtime detection for browser
+  if (typeof window !== 'undefined') {
+    const hostname = window.location.hostname;
+    // If accessing via IP, use that IP for API
+    if (hostname !== 'localhost' && hostname !== '127.0.0.1') {
+      return `http://${hostname}:8000`;
+    }
+  }
+  
+  // Fallback
+  return 'http://localhost:8000';
+};
+
+const API_BASE_URL = getAPIBaseURL();
 
 const api = axios.create({
   baseURL: API_BASE_URL,
@@ -44,6 +64,7 @@ export interface MeetingSession {
   transcription?: string;
   summary?: string;
   action_items?: string;
+  sentiment_analysis?: string;
   duration?: string;
   error?: string;
 }
@@ -70,6 +91,23 @@ export const usersAPI = {
   },
 };
 
+export interface AWSCredentials {
+  aws_access_key_id?: string | null;
+  aws_secret_access_key?: string | null;
+  aws_region?: string | null;
+  s3_bucket_name?: string | null;
+  bedrock_bearer_token?: string | null;
+}
+
+export interface AWSCredentialsResponse {
+  aws_access_key_id?: string | null;
+  aws_secret_access_key_masked?: string | null;
+  aws_region?: string | null;
+  s3_bucket_name?: string | null;
+  bedrock_bearer_token?: string | null;
+  is_configured: boolean;
+}
+
 export const adminAPI = {
   listUsers: async () => {
     const response = await api.get('/api/admin/users');
@@ -83,6 +121,18 @@ export const adminAPI = {
   },
   createUser: async (payload: { username: string; email?: string | null; password: string; full_name?: string | null; is_admin?: boolean }) => {
     const response = await api.post('/api/admin/users', payload);
+    return response.data;
+  },
+  getAWSCredentials: async (): Promise<AWSCredentialsResponse> => {
+    const response = await api.get('/api/admin/aws-credentials');
+    return response.data;
+  },
+  updateAWSCredentials: async (payload: AWSCredentials): Promise<{ message: string }> => {
+    const response = await api.put('/api/admin/aws-credentials', payload);
+    return response.data;
+  },
+  testAWSCredentials: async (): Promise<{ success: boolean; message: string }> => {
+    const response = await api.post('/api/admin/aws-credentials/test');
     return response.data;
   },
 };
